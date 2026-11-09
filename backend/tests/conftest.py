@@ -9,7 +9,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 os.environ.setdefault("APP_SECRET_KEY", "Puia5DzYecJtxba6OZPYxLT5EbJAZgm-7NvI1IDcJqI")
-os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="pikpak-test-"))
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="pikpak-test-")
+os.environ.setdefault("DATA_DIR", _TEST_DATA_DIR)
+os.environ.setdefault("DOWNLOADS_DIR", str(Path(_TEST_DATA_DIR) / "downloads"))
+os.environ.setdefault("CACHE_DIR", str(Path(_TEST_DATA_DIR) / "cache"))
 os.environ.setdefault(
     "ARIA2C_PATH", str(ROOT / "tools" / "aria2-1.37.0-win-64bit-build1" / "aria2c.exe")
 )

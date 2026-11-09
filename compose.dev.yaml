@@ -6,6 +6,8 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - pikpak-data:/data
+      - ./downloads:/downloads
+      - ./cache:/cache
     environment:
       APP_SECRET_KEY: ${APP_SECRET_KEY:?set APP_SECRET_KEY to a base64url 32-byte key}
       PIKPAK_DRIVE_BASE_URL: ${PIKPAK_DRIVE_BASE_URL:-https://api-drive.mypikpak.com}

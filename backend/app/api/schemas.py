@@ -17,6 +17,7 @@ class DownloadJobCreate(BaseModel):
     url: str
     pass_code: str | None = None
     items: list[DownloadSelectionItem] | None = None
+    target_subdir: str | None = None
 
 
 class SharePreviewRequest(BaseModel):
@@ -56,6 +57,7 @@ class DownloadJobOut(BaseModel):
     root_file_id: str | None = None
     root_kind: str | None = None
     root_name: str | None = None
+    target_subdir: str = ""
     status: str
     total_files: int
     completed_files: int
@@ -77,6 +79,7 @@ class DownloadTaskOut(BaseModel):
     share_file_id: str
     name: str
     relative_path: str
+    target_path: str | None = None
     size: int
     expected_hash: str
     mime_type: str | None = None

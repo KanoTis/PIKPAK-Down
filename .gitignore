@@ -16,3 +16,6 @@ tools/
 *.db-shm
 .env
 
+
+downloads/
+cache/

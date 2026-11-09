@@ -1113,3 +1113,14 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.target-picker {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--gray-a4);
+}
+
+.target-picker label {
+  display: block;
+  max-width: 420px;
+}

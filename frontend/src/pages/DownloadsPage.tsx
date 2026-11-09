@@ -33,6 +33,11 @@ interface Crumb {
   name: string;
 }
 
+interface DownloadTargets {
+  root: string;
+  items: { path: string; label: string }[];
+}
+
 function joinPath(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name;
 }
@@ -50,6 +55,14 @@ export function DownloadsPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [folderLoading, setFolderLoading] = useState(false);
+  const [targetSubdir, setTargetSubdir] = useState("");
+
+  const targetsQuery = useQuery({
+    queryKey: ["download-targets"],
+    queryFn: async () =>
+      (await unwrap(await client.GET("/api/download-targets", {}))) as unknown as DownloadTargets,
+    staleTime: 15000,
+  });
 
   const jobsQuery = useQuery({
     queryKey: ["download-jobs"],
@@ -82,6 +95,7 @@ export function DownloadsPage() {
             url: url.trim(),
             pass_code: passCode.trim() || undefined,
             items,
+            target_subdir: targetSubdir.trim() || undefined,
           },
         }),
       );
@@ -503,6 +517,31 @@ export function DownloadsPage() {
             </Flex>
           ) : null}
 
+          <div className="target-picker">
+            <label>
+              <Text as="div" size="2" weight="medium" mb="1">
+                下载位置
+              </Text>
+              <TextField.Root
+                value={targetSubdir}
+                onChange={(event) => setTargetSubdir(event.target.value)}
+                placeholder="留空为根目录，或输入子目录，如 Movies/2026"
+                list="download-targets"
+                autoComplete="off"
+              />
+              <datalist id="download-targets">
+                {(targetsQuery.data?.items ?? []).map((item) => (
+                  <option key={item.path || "root"} value={item.path}>
+                    {item.label}
+                  </option>
+                ))}
+              </datalist>
+            </label>
+            <Text as="div" size="1" color="gray" mt="1">
+              相对挂载目录 {targetsQuery.data?.root ?? "/downloads"}；目录不存在会自动创建，分享的文件夹结构会保留在下面。
+            </Text>
+          </div>
+
           <Flex justify="between" align="center" gap="3" wrap="wrap" mt="3">
             <Text size="1" color="gray">
               已选择 {selectedItems.length} 项
@@ -588,6 +627,9 @@ export function DownloadsPage() {
                     </Text>
                     <Text as="div" size="1" color="gray" className="mono">
                       {job.share_id}
+                    </Text>
+                    <Text as="div" size="1" color="gray">
+                      位置 /{job.target_subdir || ""}
                     </Text>
                   </Table.Cell>
                   <Table.Cell>

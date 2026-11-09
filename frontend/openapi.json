@@ -204,6 +204,29 @@
         }
       }
     },
+    "/api/download-targets": {
+      "get": {
+        "tags": [
+          "downloads"
+        ],
+        "summary": "List Download Targets",
+        "operationId": "list_download_targets_api_download_targets_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response List Download Targets Api Download Targets Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/share-preview": {
       "post": {
         "tags": [
@@ -2044,6 +2067,17 @@
               }
             ],
             "title": "Items"
+          },
+          "target_subdir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Subdir"
           }
         },
         "type": "object",
@@ -2098,6 +2132,11 @@
               }
             ],
             "title": "Root Name"
+          },
+          "target_subdir": {
+            "type": "string",
+            "title": "Target Subdir",
+            "default": ""
           },
           "status": {
             "type": "string",
@@ -2263,6 +2302,17 @@
           "relative_path": {
             "type": "string",
             "title": "Relative Path"
+          },
+          "target_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Path"
           },
           "size": {
             "type": "integer",

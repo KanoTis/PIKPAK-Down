@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
     data_dir: Path = Path("/data")
+    downloads_dir: Path = Path("/downloads")
+    cache_dir: Path = Path("/cache")
     app_secret_key: str
     database_url: str | None = None
 
@@ -59,9 +61,9 @@ class Settings(BaseSettings):
         _decode_secret(value)
         return value
 
-    @field_validator("data_dir", mode="before")
+    @field_validator("data_dir", "downloads_dir", "cache_dir", mode="before")
     @classmethod
-    def _expand_data_dir(cls, value: object) -> object:
+    def _expand_path(cls, value: object) -> object:
         if isinstance(value, str):
             return Path(os.path.expanduser(value))
         return value
@@ -78,10 +80,12 @@ class Settings(BaseSettings):
 
     @property
     def tmp_dir(self) -> Path:
-        return self.data_dir / "tmp"
+        # Legacy alias: download temporaries now live in cache_dir.
+        return self.cache_dir
 
     @property
     def files_dir(self) -> Path:
+        # Legacy content-addressed store, kept for old FileObject rows.
         return self.data_dir / "files"
 
     @property
@@ -93,7 +97,14 @@ class Settings(BaseSettings):
         return self.data_dir / "state"
 
     def ensure_dirs(self) -> None:
-        for path in (self.data_dir, self.tmp_dir, self.files_dir, self.evidence_dir, self.state_dir):
+        for path in (
+            self.data_dir,
+            self.downloads_dir,
+            self.cache_dir,
+            self.files_dir,
+            self.evidence_dir,
+            self.state_dir,
+        ):
             path.mkdir(parents=True, exist_ok=True)
             try:
                 path.chmod(0o700)

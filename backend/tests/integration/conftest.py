@@ -42,6 +42,8 @@ async def env(fake_server):
 
     data_dir = tempfile.mkdtemp(prefix="pikpak-it-")
     os.environ["DATA_DIR"] = data_dir
+    os.environ["DOWNLOADS_DIR"] = os.path.join(data_dir, "downloads")
+    os.environ["CACHE_DIR"] = os.path.join(data_dir, "cache")
     os.environ["PIKPAK_DRIVE_BASE_URL"] = fake_server
     os.environ["PIKPAK_USER_BASE_URL"] = fake_server
     reset_settings_cache()

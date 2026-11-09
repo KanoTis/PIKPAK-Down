@@ -2,7 +2,7 @@
 
 单容器、单用户的 PikPak 分享下载与血缘溯源 Web 应用。
 
-- **下载**：先解析分享并展示文件/文件夹，勾选需要的内容后再创建任务；非视频或 `anonymous_play_range=1.00` 的视频走匿名直链；否则从账号池转存、取登录态 `web_content_link` 后**立即删除云盘文件**，再下载并校验 `size + Merkle-gcid`。
+- **下载**：先解析分享并展示文件/文件夹，勾选需要的内容、选择挂载下载目录中的目标位置后再创建任务；非视频或 `anonymous_play_range=1.00` 的视频走匿名直链；否则从账号池转存、取登录态 `web_content_link` 后**立即删除云盘文件**，再下载并校验 `size + Merkle-gcid`。最终文件按分享文件夹结构写入 `/downloads/<目标子目录>/<相对路径>`，临时分片放在独立的 `/cache/<task-id>/`。
 - **血缘**：全量血缘图从分享起点枚举全部文件，按 `params.original_share_id` / `original_file_id` 逐层去重展开上游分享，聚合文件级证据为分享级边；同时保留单目标直系链、文件夹链、tenant refs、同指纹副本、匿名窗口与终止点。血缘页先解析分享并勾选文件/文件夹，再创建运行；图页面使用 Cytoscape.js 渲染，按深度分层，每个层级一列纵向排列；默认只绘制聚焦线路，悬停节点高亮关联节点（连接过多时不铺线），点击节点打开详情。未展开的分享显示“未展开分享”和来源文件路径，可用“补齐名称”只拉取分享元数据、不展开内容。
 - **账号池**：只导入人工取得的 `refresh_token`；不自动注册、不处理验证码、不保存登录密码。
 
@@ -11,10 +11,21 @@
 ```bash
 python -c "import base64,os; print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('='))"
 cp .env.example .env   # 填入 APP_SECRET_KEY
+mkdir -p downloads cache
 docker compose up --build        # 使用当前目录 docker-compose.yml
 ```
 
 打开 `http://127.0.0.1:8080`。Compose 只绑定 `127.0.0.1`，不映射 aria2 RPC 6800。
+
+默认挂载：
+
+```text
+./downloads -> /downloads   最终文件，按分享目录结构
+./cache     -> /cache       下载临时分片，完成/取消后清理
+pikpak-data -> /data        SQLite、证据、旧对象存储
+```
+
+可用 `DOWNLOADS_HOST_DIR` / `CACHE_HOST_DIR` 改宿主路径。Linux 上如果宿主机目录不是 UID 10001 所有，容器入口会尝试 chown；也可以提前执行 `sudo chown -R 10001:10001 downloads cache`。
 
 开发环境如果只想用旧的本机构建配置：
 
@@ -50,6 +61,8 @@ uv sync --group dev
 pnpm --dir frontend install --frozen-lockfile
 export APP_SECRET_KEY="<base64url-32-byte-key>"
 export DATA_DIR="./data"
+export DOWNLOADS_DIR="./downloads"
+export CACHE_DIR="./cache"
 PYTHONPATH=backend uv run uvicorn app.main:app --reload --port 8080
 pnpm --dir frontend dev
 ```
@@ -63,15 +76,24 @@ pnpm --dir frontend gen:api
 
 ## 配置
 
-必填 `APP_SECRET_KEY`（base64url 32 字节）；数据目录默认 `/data`，SQLite 位于 `/data/pikpak.db`。`DOWNLOAD_MAX_CONCURRENCY`、`ARIA2_SPLIT`、`LINEAGE_MAX_*` 等都可省略，代码默认值与 `.env.example` 一致；也可在 `/settings` 页面运行时调整并持久化。
+必填 `APP_SECRET_KEY`（base64url 32 字节）。默认目录：
 
-启动时创建 `/data/{tmp,files,evidence,state}` 并执行 Alembic migration。只运行一个 Uvicorn worker，调度器与 aria2 都在同一进程生命周期内管理。
+```text
+DATA_DIR=/data           SQLite /data/pikpak.db、证据、旧对象
+DOWNLOADS_DIR=/downloads 最终下载目录
+CACHE_DIR=/cache         下载临时目录
+```
+
+`DOWNLOAD_MAX_CONCURRENCY`、`ARIA2_SPLIT`、`LINEAGE_MAX_*` 等都可省略，代码默认值与 `.env.example` 一致；也可在 `/settings` 页面运行时调整并持久化。
+
+启动时创建 `DATA_DIR`、`DOWNLOADS_DIR`、`CACHE_DIR` 与证据/状态目录，并执行 Alembic migration。只运行一个 Uvicorn worker，调度器与 aria2 都在同一进程生命周期内管理。
 
 ## API 摘要
 
 - `POST /api/share-preview`：解析分享并分页浏览目录，供前端勾选
+- `GET /api/download-targets`：列出挂载下载目录下可选的目标子目录
 - `GET /api/settings`、`PATCH /api/settings`：运行时调整下载并发、单任务连接数与血缘预算，持久化到 `app_settings`
-- `POST/GET /api/download-jobs`、`GET /api/download-jobs/{id}`、`GET /api/download-jobs/{id}/files`、`POST /api/download-jobs/{id}/cancel`、`DELETE /api/download-jobs/{id}`
+- `POST/GET /api/download-jobs`（创建时 `target_subdir` 选择下载位置）、`GET /api/download-jobs/{id}`、`GET /api/download-jobs/{id}/files`、`POST /api/download-jobs/{id}/cancel`、`DELETE /api/download-jobs/{id}`
 - `GET /api/downloads/{id}`、`POST /api/downloads/{id}/pause|resume|retry|cancel`、`GET /api/downloads/{id}/file`
 - `GET/POST /api/accounts`、`POST /api/accounts/{id}/refresh|enable|disable`、`DELETE /api/accounts/{id}`、`GET /api/cleanups`
 - `POST /api/lineage-runs`：`graph: true` 创建血缘图运行；可带 `items` 只展开勾选的文件/文件夹，不传则遍历整个分享
@@ -96,6 +118,7 @@ uv run pytest backend/tests/integration -q
 ## 验证记录
 
 - 设置页：`/settings`，调整任务并发（1–16）、单任务连接数（aria2 split / 每服务器连接，1–16）、血缘条目/请求/分享/目录预算；保存后立即生效并跨重启保留。
+- 下载结构：最终文件写入 `DOWNLOADS_DIR/<target_subdir>/<分享相对路径>`，文件夹选择保留子树；临时文件在 `CACHE_DIR/<task-id>/download.bin`，成功后原子移动/跨挂载复制，失败或取消时删除。
 - 后端测试：`32 passed`（captcha 向量、Merkle 向量、窗口并集、下载/转存/删除顺序、清理重试、匿名/账号/文件夹下载、预览与勾选下载、嵌套目录选择、断点重启、状态机、错误契约、血缘直系/文件夹/tenant refs/窗口、全量图 BFS 去重与图 API）。
 - 删除：下载任务与血缘运行在列表页可删除；运行中的任务需先取消。删除下载任务会移除任务记录，删除不再被其他任务引用的下载文件，云端待清理项继续执行；删除血缘运行会移除节点/边/快照/图数据与证据目录。
 - 全量图 UI：真实分享回归得到 83 个分享节点、48,641 个文件、1,359 个目录；层级为 L0 起点 → L1 直接上游 → L2 二级上游 → L3 三级上游。验证图例筛选、缩放/适应画布、节点详情来源文件、分享内容分页（500 → 1,000）。命中 `LINEAGE_MAX_ITEMS=50000` 时报告 `budget_exhausted`，未展开节点标记为“预算截断”并在详情提示。

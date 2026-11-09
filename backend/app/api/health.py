@@ -52,6 +52,19 @@ async def health() -> JSONResponse:
         checks["data_dir"] = False
         details["data_dir"] = str(exc)
 
+    for key, directory in (
+        ("downloads_dir", settings.downloads_dir),
+        ("cache_dir", settings.cache_dir),
+    ):
+        try:
+            handle, path = tempfile.mkstemp(dir=directory, prefix=".health-")
+            os.close(handle)
+            Path(path).unlink(missing_ok=True)
+            checks[key] = True
+        except Exception as exc:  # noqa: BLE001
+            checks[key] = False
+            details[key] = str(exc)
+
     ok = all(checks.values())
     return JSONResponse(
         status_code=200 if ok else 503,

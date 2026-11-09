@@ -58,6 +58,8 @@ async def env(fake_server):
 
     data_dir = tempfile.mkdtemp(prefix="pikpak-it-")
     os.environ["DATA_DIR"] = data_dir
+    os.environ["DOWNLOADS_DIR"] = os.path.join(data_dir, "downloads")
+    os.environ["CACHE_DIR"] = os.path.join(data_dir, "cache")
     os.environ["PIKPAK_DRIVE_BASE_URL"] = fake_server
     os.environ["PIKPAK_USER_BASE_URL"] = fake_server
     reset_settings_cache()
@@ -145,16 +147,10 @@ async def test_anonymous_share_downloads_without_account(env, fake_server) -> No
     assert state["restore_calls"] == 0
     assert state["delete_calls"] == 0
 
-    from app.db import get_session_factory
-    from app.models import FileObject
-
-    factory = get_session_factory()
-    async with factory() as session:
-        obj = await session.get(FileObject, task.object_id)
-        assert obj is not None
-        path = env.data_dir / obj.rel_path
-        assert path.read_bytes() == bytes(range(256)) * 4097
-        assert obj.merkle_chunk == 256 * 1024
+    assert task.target_path == "anon.bin"
+    path = env.downloads_dir / task.target_path
+    assert path.read_bytes() == bytes(range(256)) * 4097
+    assert task.verified_chunk == 256 * 1024
 
 
 @pytest.mark.asyncio
@@ -180,7 +176,7 @@ async def test_account_handoff_deletes_before_download(env, fake_server) -> None
     assert min(item["t"] for item in aria2_requests) > min(delete_times)
 
     from app.db import get_session_factory
-    from app.models import Account, FileObject
+    from app.models import Account
 
     factory = get_session_factory()
     async with factory() as session:
@@ -188,9 +184,8 @@ async def test_account_handoff_deletes_before_download(env, fake_server) -> None
             await session.execute(__import__("sqlalchemy").select(Account))
         ).scalar_one()
         assert account.lease_task_id is None
-        obj = await session.get(FileObject, task.object_id)
-        assert obj is not None
-        assert (env.data_dir / obj.rel_path).read_bytes() == bytes(range(256)) * 4097
+    assert task.target_path == "account.mp4"
+    assert (env.downloads_dir / task.target_path).read_bytes() == bytes(range(256)) * 4097
 
 
 @pytest.mark.asyncio
@@ -267,13 +262,13 @@ async def test_restart_reuses_partial_and_finishes(env, fake_server) -> None:
                 )
             ).scalar_one_or_none()
             if task is not None and task.status == "ANON_DOWNLOADING" and task.bytes_done > 0:
-                candidate = env.tmp_dir / task.id / "download.bin"
+                candidate = env.cache_dir / task.id / "download.bin"
                 if candidate.exists() and candidate.stat().st_size > 0:
                     break
         await asyncio.sleep(0.05)
     assert task is not None
     assert task.status == "ANON_DOWNLOADING"
-    temp = env.tmp_dir / task.id / "download.bin"
+    temp = env.cache_dir / task.id / "download.bin"
     assert temp.exists() and temp.stat().st_size > 0
     partial_size = temp.stat().st_size
 
@@ -288,19 +283,13 @@ async def test_restart_reuses_partial_and_finishes(env, fake_server) -> None:
     assert tasks[0].bytes_done == SLOW_SIZE
     assert tasks[0].expected_hash == SLOW_HASH
     assert partial_size > 0
-    from app.models import FileObject
-
-    async with factory() as session:
-        obj = await session.get(FileObject, tasks[0].object_id)
-        assert obj is not None
-        path = env.data_dir / obj.rel_path
-        assert path.stat().st_size == SLOW_SIZE
+    assert tasks[0].target_path == "slow.bin"
+    assert (env.downloads_dir / tasks[0].target_path).stat().st_size == SLOW_SIZE
 
 
 @pytest.mark.asyncio
 async def test_folder_share_enumerates_and_downloads_all_files(env, fake_server) -> None:
     from app.db import get_session_factory
-    from app.models import FileObject
 
     job_id = await create_job(f"https://mypikpak.com/s/{FOLDER_SHARE}")
     job, tasks = await run_until(job_id, lambda job, tasks: job.status == "COMPLETED")
@@ -310,12 +299,12 @@ async def test_folder_share_enumerates_and_downloads_all_files(env, fake_server)
     assert {task.status for task in tasks} == {"DONE"}
     paths = {task.relative_path for task in tasks}
     assert paths == {"folder-root/anon-copy.bin", "folder-root/small.bin"}
-    factory = get_session_factory()
-    async with factory() as session:
-        for task in tasks:
-            obj = await session.get(FileObject, task.object_id)
-            assert obj is not None
-            assert (env.data_dir / obj.rel_path).stat().st_size == task.size
+    for task in tasks:
+        assert task.target_path in {
+            "folder-root/anon-copy.bin",
+            "folder-root/small.bin",
+        }
+        assert (env.downloads_dir / task.target_path).stat().st_size == task.size
 
 
 @pytest.mark.asyncio
@@ -356,6 +345,15 @@ async def test_preview_and_selected_file_download(env, fake_server) -> None:
     assert tasks[0].status == "DONE"
     assert tasks[0].share_file_id == FOLDER_FILE1
     assert tasks[0].relative_path == "folder-root/anon-copy.bin"
+    assert tasks[0].target_path == "folder-root/anon-copy.bin"
+    assert (env.downloads_dir / tasks[0].target_path).read_bytes() == bytes(range(256)) * 4097
+    assert not (env.cache_dir / tasks[0].id).exists()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30) as client:
+        served = await client.get(f"/api/downloads/{tasks[0].id}/file")
+        assert served.status_code == 200
+        assert served.content == bytes(range(256)) * 4097
 
 
 @pytest.mark.asyncio
@@ -368,6 +366,7 @@ async def test_selected_folder_downloads_subtree(env, fake_server) -> None:
             "/api/download-jobs",
             json={
                 "url": f"https://mypikpak.com/s/{FOLDER_SHARE}",
+                "target_subdir": "library",
                 "items": [
                     {
                         "file_id": FOLDER_ROOT,
@@ -388,6 +387,12 @@ async def test_selected_folder_downloads_subtree(env, fake_server) -> None:
         "folder-root/anon-copy.bin",
         "folder-root/small.bin",
     }
+    assert {task.target_path for task in tasks} == {
+        "library/folder-root/anon-copy.bin",
+        "library/folder-root/small.bin",
+    }
+    for task in tasks:
+        assert (env.downloads_dir / task.target_path).stat().st_size == task.size
 
 
 @pytest.mark.asyncio

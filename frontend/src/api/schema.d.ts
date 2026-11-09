@@ -56,6 +56,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/download-targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Download Targets */
+        get: operations["list_download_targets_api_download_targets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/share-preview": {
         parameters: {
             query?: never;
@@ -635,6 +652,8 @@ export interface components {
             pass_code?: string | null;
             /** Items */
             items?: components["schemas"]["DownloadSelectionItem"][] | null;
+            /** Target Subdir */
+            target_subdir?: string | null;
         };
         /** DownloadJobOut */
         DownloadJobOut: {
@@ -650,6 +669,11 @@ export interface components {
             root_kind?: string | null;
             /** Root Name */
             root_name?: string | null;
+            /**
+             * Target Subdir
+             * @default
+             */
+            target_subdir: string;
             /** Status */
             status: string;
             /** Total Files */
@@ -711,6 +735,8 @@ export interface components {
             name: string;
             /** Relative Path */
             relative_path: string;
+            /** Target Path */
+            target_path?: string | null;
             /** Size */
             size: number;
             /** Expected Hash */
@@ -1090,6 +1116,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_download_targets_api_download_targets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: unknown;
+                    };
                 };
             };
         };

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -47,6 +50,7 @@ def job_out(job: DownloadJob) -> DownloadJobOut:
         root_file_id=job.root_file_id,
         root_kind=job.root_kind,
         root_name=job.root_name,
+        target_subdir=job.target_subdir,
         status=job.status,
         total_files=job.total_files,
         completed_files=job.completed_files,
@@ -70,6 +74,7 @@ def task_out(task: DownloadTask) -> DownloadTaskOut:
         share_file_id=task.share_file_id,
         name=task.name,
         relative_path=task.relative_path,
+        target_path=task.target_path,
         size=task.size,
         expected_hash=task.expected_hash,
         mime_type=task.mime_type,
@@ -122,11 +127,40 @@ async def create_download_job(
             input_url=body.url,
             pass_code=body.pass_code,
             items=[item.model_dump() for item in body.items] if body.items is not None else None,
+            target_subdir=body.target_subdir,
         )
     except ValueError as exc:
         raise _error(400, "INVALID_SHARE_URL", str(exc)) from exc
     await session.commit()
     return job_out(job)
+
+
+@router.get("/download-targets")
+async def list_download_targets() -> dict:
+    settings = get_settings()
+    root = settings.downloads_dir
+    root.mkdir(parents=True, exist_ok=True)
+    items: list[dict[str, str]] = [{"path": "", "label": "根目录"}]
+    seen = 0
+    for current, dirs, _files in os.walk(root, followlinks=False):
+        relative = Path(current).relative_to(root).as_posix()
+        depth = 0 if relative == "." else relative.count("/") + 1
+        if depth >= 4:
+            dirs[:] = []
+            continue
+        dirs[:] = sorted(
+            name for name in dirs if not name.startswith(".") and not (Path(current) / name).is_symlink()
+        )
+        for name in dirs:
+            child = (Path(current) / name).relative_to(root).as_posix()
+            items.append({"path": child, "label": child})
+            seen += 1
+            if seen >= 500:
+                dirs[:] = []
+                break
+        if seen >= 500:
+            break
+    return {"root": str(root), "items": items}
 
 
 @router.post("/share-preview", response_model=SharePreviewOut)
@@ -306,15 +340,23 @@ async def download_file(task_id: str, session: AsyncSession = Depends(get_sessio
     task = await session.get(DownloadTask, task_id)
     if task is None:
         raise _error(404, "TASK_NOT_FOUND", "文件任务不存在")
-    if task.status != TaskStatus.DONE or not task.object_id:
+    if task.status != TaskStatus.DONE:
         raise _error(409, "TASK_NOT_READY", "文件尚未完成校验")
-    obj = await session.get(FileObject, task.object_id)
-    if obj is None:
-        raise _error(404, "OBJECT_NOT_FOUND", "本地对象不存在")
     settings = get_settings()
-    path = (settings.data_dir / obj.rel_path).resolve()
-    files_root = settings.files_dir.resolve()
-    if not str(path).startswith(str(files_root)) or not path.is_file():
+    if task.target_path:
+        path = (settings.downloads_dir / task.target_path).resolve()
+        root = settings.downloads_dir.resolve()
+        if root not in path.parents or not path.is_file():
+            raise _error(404, "OBJECT_NOT_FOUND", "本地文件不存在")
+    elif task.object_id:
+        obj = await session.get(FileObject, task.object_id)
+        if obj is None:
+            raise _error(404, "OBJECT_NOT_FOUND", "本地对象不存在")
+        path = (settings.data_dir / obj.rel_path).resolve()
+        files_root = settings.files_dir.resolve()
+        if files_root not in path.parents or not path.is_file():
+            raise _error(404, "OBJECT_NOT_FOUND", "本地文件不存在")
+    else:
         raise _error(404, "OBJECT_NOT_FOUND", "本地文件不存在")
     if path.stat().st_size != task.size:
         raise _error(409, "OBJECT_SIZE_MISMATCH", "本地文件大小异常")

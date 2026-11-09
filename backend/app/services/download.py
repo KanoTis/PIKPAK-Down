@@ -87,12 +87,51 @@ def _safe_relative_path(value: str | None, fallback: str) -> str:
     return "/".join(parts)[:1024]
 
 
+def _safe_subdir(value: str | None) -> str:
+    text = (value or "").replace("\\", "/").strip()
+    parts = [part for part in text.split("/") if part not in ("", ".", "..")]
+    return "/".join(parts)[:512]
+
+
+def _join_relative(parent: str, child: str) -> str:
+    parent = _safe_subdir(parent)
+    child = _safe_relative_path(child, "")
+    return f"{parent}/{child}".strip("/")
+
+
+def _download_path(relative: str) -> Path:
+    settings = get_settings()
+    root = settings.downloads_dir.resolve()
+    candidate = (root / relative).resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ValueError("下载路径越界")
+    return candidate
+
+
+def _download_relative(path: Path) -> str:
+    root = get_settings().downloads_dir.resolve()
+    return path.resolve().relative_to(root).as_posix()
+
+
+def _unique_target(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    for index in range(1, 1000):
+        candidate = path.with_name(f"{stem} ({index}){suffix}")
+        if not candidate.exists():
+            return candidate
+    raise ValueError("目标文件重名过多")
+
+
 async def create_job(
     session: AsyncSession,
     *,
     input_url: str,
     pass_code: str | None,
     items: list[dict] | None = None,
+    target_subdir: str | None = None,
 ) -> DownloadJob:
     parsed = parse_share_input(input_url, pass_code)
     input_display = parsed.source_url or input_url
@@ -127,6 +166,7 @@ async def create_job(
         share_id=parsed.share_id,
         pass_code_enc=encrypt(parsed.pass_code),
         status=JobStatus.ENUMERATING,
+        target_subdir=_safe_subdir(target_subdir),
     )
     if selection:
         job.root_kind = "selection"
@@ -236,6 +276,7 @@ async def _upsert_task(
             )
         )
     ).scalar_one_or_none()
+    target_path = _join_relative(job.target_subdir, relative_path)
     if existing is not None:
         existing.name = node.name or existing.name
         existing.size = node.size
@@ -245,6 +286,7 @@ async def _upsert_task(
         if node.hash:
             existing.expected_hash = node.hash
         existing.relative_path = relative_path or existing.relative_path
+        existing.target_path = target_path
         return existing
     task = DownloadTask(
         job_id=job.id,
@@ -252,6 +294,7 @@ async def _upsert_task(
         expected_hash=node.hash or "",
         name=node.name,
         relative_path=relative_path,
+        target_path=target_path,
         size=node.size,
         mime_type=node.mime_type,
         kind=node.kind,
@@ -806,18 +849,18 @@ async def _plan_task(
         await session.commit()
         return
 
-    existing = (
-        await session.execute(
-            select(FileObject).where(
-                FileObject.hash == task.expected_hash, FileObject.size == task.size
-            )
+    target_relative = task.target_path or _join_relative(
+        job.target_subdir, task.relative_path
+    )
+    target = _download_path(target_relative)
+    if target.is_file() and target.stat().st_size == task.size:
+        existing_result = await asyncio.to_thread(
+            verify_file, target, task.size, task.expected_hash
         )
-    ).scalar_one_or_none()
-    if existing is not None:
-        final_path = get_settings().data_dir / existing.rel_path
-        if final_path.is_file() and final_path.stat().st_size == task.size:
-            task.object_id = existing.id
+        if existing_result.ok:
+            task.target_path = _download_relative(target)
             task.bytes_done = task.size
+            task.verified_chunk = existing_result.chunk
             task.route = "object"
             task.source_url_enc = None
             _set_status(task, TaskStatus.DONE)
@@ -826,14 +869,12 @@ async def _plan_task(
                 session,
                 "download_task",
                 task.id,
-                "download_task.reused_object",
+                "download_task.reused_target",
                 {"hash": task.expected_hash, "size": task.size},
             )
             await _refresh_job(session, job)
             await session.commit()
             return
-        await session.delete(existing)
-        await session.flush()
 
     plan: DownloadPlan | None = None
     candidate = anonymous_plan(node, share_id=job.share_id)
@@ -951,7 +992,7 @@ async def _find_candidate_plan(
 async def _finish_empty_task(
     session: AsyncSession, job: DownloadJob, task: DownloadTask
 ) -> None:
-    temp_dir = get_settings().tmp_dir / task.id
+    temp_dir = get_settings().cache_dir / task.id
     temp_dir.mkdir(parents=True, exist_ok=True)
     path = temp_dir / "download.bin"
     path.write_bytes(b"")
@@ -965,7 +1006,7 @@ async def _start_aria2(
         raise PikPakError("empty download url", code="EMPTY_URL", retryable=True)
     if not aria2.available:
         raise PikPakError("aria2 不可用", code="ARIA2_UNAVAILABLE", retryable=True)
-    directory = get_settings().tmp_dir / task.id
+    directory = get_settings().cache_dir / task.id
     gid = await aria2.add_uri(url, directory, "download.bin")
     task.aria2_gid = gid
     task.bytes_total = task.size
@@ -1524,36 +1565,38 @@ async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTa
         await _refresh_job(session, job)
         await session.commit()
         return
-    temp = get_settings().tmp_dir / task.id / "download.bin"
+    temp = get_settings().cache_dir / task.id / "download.bin"
     result = await asyncio.to_thread(verify_file, temp, task.size, task.expected_hash)
     if result.ok:
         settings = get_settings()
-        final_dir = settings.files_dir / task.expected_hash[:2]
-        final_dir.mkdir(parents=True, exist_ok=True)
-        final_path = final_dir / f"{task.expected_hash}-{task.size}.bin"
-        if final_path.exists() and final_path.stat().st_size == task.size:
+        relative = task.target_path or _join_relative(
+            job.target_subdir, task.relative_path
+        )
+        target = _download_path(relative)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists():
+            reusable = target.stat().st_size == task.size
+            if reusable:
+                existing_result = await asyncio.to_thread(
+                    verify_file, target, task.size, task.expected_hash
+                )
+                reusable = existing_result.ok
+            if reusable:
+                temp.unlink(missing_ok=True)
+            else:
+                target = _unique_target(target)
+        if target.exists():
             temp.unlink(missing_ok=True)
         else:
-            os.replace(temp, final_path)
+            try:
+                os.replace(temp, target)
+            except OSError:
+                shutil.move(str(temp), str(target))
         control = Path(str(temp) + ".aria2")
         control.unlink(missing_ok=True)
-        existing = (
-            await session.execute(
-                select(FileObject).where(
-                    FileObject.hash == task.expected_hash, FileObject.size == task.size
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is None:
-            existing = FileObject(
-                hash=task.expected_hash,
-                size=task.size,
-                rel_path=str(final_path.relative_to(settings.data_dir)),
-                merkle_chunk=result.chunk or 0,
-            )
-            session.add(existing)
-            await session.flush()
-        task.object_id = existing.id
+        shutil.rmtree(settings.cache_dir / task.id, ignore_errors=True)
+        task.target_path = _download_relative(target)
+        task.object_id = None
         task.bytes_done = task.size
         task.verified_chunk = result.chunk
         task.speed = 0
@@ -1567,7 +1610,12 @@ async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTa
             "download_task",
             task.id,
             "download_task.done",
-            {"hash": task.expected_hash, "size": task.size, "chunk": result.chunk},
+            {
+                "hash": task.expected_hash,
+                "size": task.size,
+                "chunk": result.chunk,
+                "target_path": task.target_path,
+            },
         )
         await _refresh_job(session, job)
         await session.commit()
@@ -1668,7 +1716,7 @@ async def cancel_task(session: AsyncSession, task_id: str) -> DownloadTask:
                 await client.close()
     if task.account_id:
         await release_account(session, task.account_id, task.id)
-    shutil.rmtree(get_settings().tmp_dir / task.id, ignore_errors=True)
+    shutil.rmtree(get_settings().cache_dir / task.id, ignore_errors=True)
     _set_status(task, TaskStatus.CANCELLED)
     task.finished_at = utcnow()
     task.speed = 0
@@ -1752,10 +1800,37 @@ async def delete_job(session: AsyncSession, job_id: str) -> str:
     ).scalars().all()
     task_ids = [task.id for task in tasks]
     object_ids = sorted({task.object_id for task in tasks if task.object_id})
+    target_paths = sorted({task.target_path for task in tasks if task.target_path})
     settings = get_settings()
 
+    for relative in target_paths:
+        shared = (
+            await session.execute(
+                select(func.count(DownloadTask.id)).where(
+                    DownloadTask.target_path == relative,
+                    DownloadTask.job_id != job.id,
+                )
+            )
+        ).scalar_one()
+        if shared:
+            continue
+        try:
+            path = _download_path(relative)
+        except ValueError:
+            continue
+        if path.is_file():
+            path.unlink(missing_ok=True)
+        parent = path.parent
+        root = settings.downloads_dir.resolve()
+        while parent != root and parent.is_dir() and not any(parent.iterdir()):
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
     for task_id in task_ids:
-        shutil.rmtree(settings.tmp_dir / task_id, ignore_errors=True)
+        shutil.rmtree(settings.cache_dir / task_id, ignore_errors=True)
     if task_ids:
         await session.execute(
             delete(Event).where(

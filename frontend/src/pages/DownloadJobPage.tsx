@@ -131,7 +131,7 @@ export function DownloadJobPage() {
     <>
       <PageHeader
         title={job.root_name || job.share_id}
-        description={`分享 ${job.share_id} · 任务 ${job.id}`}
+        description={`分享 ${job.share_id} · 位置 /${job.target_subdir || ""} · 任务 ${job.id}`}
         actions={
           <>
             <Button variant="soft" color="gray" asChild>
@@ -309,7 +309,7 @@ function TaskRows({
             {task.name}
           </Text>
           <Text as="div" size="1" color="gray" className="mono">
-            {task.relative_path || task.share_file_id}
+            {task.target_path || task.relative_path || task.share_file_id}
           </Text>
         </Table.Cell>
         <Table.Cell>

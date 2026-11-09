@@ -64,7 +64,7 @@ class Aria2Manager:
                 self._available = False
                 return
             self.port = self._pick_port()
-            self.settings.tmp_dir.mkdir(parents=True, exist_ok=True)
+            self.settings.cache_dir.mkdir(parents=True, exist_ok=True)
             args = [
                 binary,
                 "--enable-rpc=true",
@@ -93,7 +93,7 @@ class Aria2Manager:
                 "--console-log-level=warn",
                 "--log-level=warn",
                 "--dir",
-                str(self.settings.tmp_dir),
+                str(self.settings.cache_dir),
             ]
             if self.settings.download_max_rate > 0:
                 args.append(f"--max-overall-download-limit={self.settings.download_max_rate}")
