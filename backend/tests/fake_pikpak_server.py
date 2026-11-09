@@ -928,6 +928,24 @@ def create_app() -> FastAPI:
         STATE["events"].append({"type": "fetch", "file_id": file_id, "t": time.time()})
         return data
 
+    @app.post("/drive/v1/files:batchDelete")
+    async def batch_delete(request: Request):
+        denied = _require_drive(request)
+        if denied:
+            return denied
+        body = await request.json()
+        ids = body.get("ids") or []
+        for file_id in ids:
+            STATE["delete_calls"] += 1
+            STATE["events"].append({"type": "delete", "file_id": file_id, "t": time.time()})
+            if file_id == FAIL_DRIVE_FILE and STATE["delete_failures"] < 3:
+                STATE["delete_failures"] += 1
+                return JSONResponse(status_code=500, content={"error": "server_error"})
+            if file_id == FAIL_DRIVE_FILE and STATE["delete_failures"] == 3:
+                STATE["delete_failures"] += 1
+                return JSONResponse(status_code=404, content={"error": "file_not_found"})
+        return {"task_id": "DELETE0000000000001"}
+
     @app.delete("/drive/v1/files/{file_id}")
     async def delete_file(file_id: str, request: Request):
         denied = _require_drive(request)

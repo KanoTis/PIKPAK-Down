@@ -628,5 +628,9 @@ class AccountPikPakClient(_BaseClient):
         return response.json()
 
     async def delete_file(self, file_id: str) -> int:
-        response = await self._drive("DELETE", f"/drive/v1/files/{file_id}", allow_404=True)
+        response = await self._drive(
+            "POST",
+            "/drive/v1/files:batchDelete",
+            json_body={"ids": [file_id]},
+        )
         return response.status_code
