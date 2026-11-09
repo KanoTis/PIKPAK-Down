@@ -442,3 +442,82 @@ async def test_preview_nested_folder_and_selected_subtree(env, fake_server) -> N
     assert len(tasks) == 1
     assert tasks[0].status == "DONE"
     assert tasks[0].relative_path == "root/sub/small.bin"
+
+
+@pytest.mark.asyncio
+async def test_account_added_after_queue_unblocks_task(env, fake_server) -> None:
+    job_id = await create_job(f"https://mypikpak.com/s/{ACCOUNT_SHARE}")
+    job, tasks = await run_until(
+        job_id,
+        lambda job, tasks: bool(tasks) and tasks[0].status == "ACCOUNT_QUEUED",
+    )
+    assert tasks[0].queue_reason == "NO_ACCOUNT"
+
+    await import_fake_account()
+    job, tasks = await run_until(
+        job_id,
+        lambda job, tasks: job.status == "COMPLETED",
+        timeout=60,
+    )
+    assert tasks[0].status == "DONE"
+    assert tasks[0].account_id is not None
+
+
+@pytest.mark.asyncio
+async def test_stale_account_lease_is_recovered(env, fake_server) -> None:
+    from datetime import timedelta
+
+    from app.db import get_session_factory
+    from app.models import Account, utcnow
+
+    job_id = await create_job(f"https://mypikpak.com/s/{ACCOUNT_SHARE}")
+    job, tasks = await run_until(
+        job_id,
+        lambda job, tasks: bool(tasks) and tasks[0].status == "ACCOUNT_QUEUED",
+    )
+    assert tasks[0].queue_reason == "NO_ACCOUNT"
+    account_id = await import_fake_account()
+
+    factory = get_session_factory()
+    async with factory() as session:
+        account = await session.get(Account, account_id)
+        account.lease_task_id = "deleted-task-id"
+        account.lease_expires_at = utcnow() + timedelta(minutes=30)
+        await session.commit()
+
+    job, tasks = await run_until(
+        job_id,
+        lambda job, tasks: job.status == "COMPLETED",
+        timeout=60,
+    )
+    assert tasks[0].status == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_account_reclaims_own_lease(env, fake_server) -> None:
+    from datetime import timedelta
+
+    from app.db import get_session_factory
+    from app.models import Account, utcnow
+
+    job_id = await create_job(f"https://mypikpak.com/s/{ACCOUNT_SHARE}")
+    job, tasks = await run_until(
+        job_id,
+        lambda job, tasks: bool(tasks) and tasks[0].status == "ACCOUNT_QUEUED",
+    )
+    task = tasks[0]
+    account_id = await import_fake_account()
+
+    factory = get_session_factory()
+    async with factory() as session:
+        account = await session.get(Account, account_id)
+        account.lease_task_id = task.id
+        account.lease_expires_at = utcnow() + timedelta(minutes=30)
+        await session.commit()
+
+    job, tasks = await run_until(
+        job_id,
+        lambda job, tasks: job.status == "COMPLETED",
+        timeout=60,
+    )
+    assert tasks[0].status == "DONE"

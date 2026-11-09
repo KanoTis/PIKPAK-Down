@@ -7,12 +7,12 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..db import get_session_factory
-from ..models import Account, AccountState, utcnow
+from ..models import Account, AccountState, DownloadTask, TaskStatus, utcnow
 from ..pikpak.client import AccountCredentials, AccountPikPakClient
 from ..pikpak.errors import PikPakError, Unauthorized
 from ..security import decrypt, encrypt
@@ -175,6 +175,37 @@ async def recover_cooldowns(session: AsyncSession) -> None:
     )
 
 
+
+async def recover_stale_leases(session: AsyncSession) -> None:
+    rows = (
+        await session.execute(
+            select(Account.id, Account.lease_task_id).where(
+                Account.lease_task_id.is_not(None)
+            )
+        )
+    ).all()
+    stale: list[tuple[str, str]] = []
+    for account_id, task_id in rows:
+        if not task_id:
+            stale.append((account_id, task_id or ""))
+            continue
+        task = await session.get(DownloadTask, task_id)
+        if (
+            task is None
+            or task.status in TaskStatus.TERMINAL
+            or task.status == TaskStatus.PAUSED
+        ):
+            stale.append((account_id, task_id))
+    for account_id, task_id in stale:
+        await session.execute(
+            update(Account)
+            .where(Account.id == account_id, Account.lease_task_id == task_id)
+            .values(lease_task_id=None, lease_expires_at=None, updated_at=utcnow())
+        )
+    if stale:
+        await session.flush()
+
+
 async def claim_account(
     session: AsyncSession,
     *,
@@ -184,6 +215,7 @@ async def claim_account(
     settings = get_settings()
     await reset_daily_counters(session)
     await recover_cooldowns(session)
+    await recover_stale_leases(session)
     now = utcnow()
 
     if preferred_account_id:
@@ -192,7 +224,9 @@ async def claim_account(
             .where(
                 Account.id == preferred_account_id,
                 Account.state.in_([AccountState.ACTIVE, AccountState.DISABLED]),
-                (Account.lease_task_id.is_(None)) | (Account.lease_expires_at < now),
+                (Account.lease_task_id.is_(None))
+                | (Account.lease_task_id == task_id)
+                | (Account.lease_expires_at < now),
             )
             .values(
                 lease_task_id=task_id,
@@ -211,7 +245,9 @@ async def claim_account(
             .where(
                 Account.state == AccountState.ACTIVE,
                 (Account.cooldown_until.is_(None)) | (Account.cooldown_until < now),
-                (Account.lease_task_id.is_(None)) | (Account.lease_expires_at < now),
+                (Account.lease_task_id.is_(None))
+                | (Account.lease_task_id == task_id)
+                | (Account.lease_expires_at < now),
             )
             .order_by(Account.last_used_at.is_(None).desc(), Account.last_used_at.asc(), Account.id.asc())
             .limit(20)
@@ -223,7 +259,9 @@ async def claim_account(
             .where(
                 Account.id == account_id,
                 Account.state == AccountState.ACTIVE,
-                (Account.lease_task_id.is_(None)) | (Account.lease_expires_at < now),
+                (Account.lease_task_id.is_(None))
+                | (Account.lease_task_id == task_id)
+                | (Account.lease_expires_at < now),
             )
             .values(
                 lease_task_id=task_id,
@@ -333,4 +371,19 @@ async def account_state_summary(session: AsyncSession) -> str:
         return "NO_ACCOUNT"
     if all(state in (AccountState.COOLDOWN, AccountState.INVALID) for state in rows):
         return "ALL_COOLDOWN"
-    return "NO_ACCOUNT"
+    active = [state for state in rows if state == AccountState.ACTIVE]
+    if not active:
+        return "NO_ACCOUNT"
+    leased = int(
+        (
+            await session.execute(
+                select(func.count(Account.id)).where(
+                    Account.state == AccountState.ACTIVE,
+                    Account.lease_task_id.is_not(None),
+                )
+            )
+        ).scalar_one()
+    )
+    if leased >= len(active):
+        return "ALL_LEASED"
+    return "ACCOUNT_BUSY"
