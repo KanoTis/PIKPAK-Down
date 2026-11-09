@@ -28,7 +28,7 @@ CI 会把镜像推送到 `ghcr.io/kanotis/pikpak-share-suite`；生产环境可�
 docker compose pull && docker compose up -d
 ```
 
-私有 GHCR 包需要先 `docker login ghcr.io`。
+如果 GHCR 包被设为私有，拉取前需要先 `docker login ghcr.io`。
 
 ## 镜像构建（GitHub Actions）
 
