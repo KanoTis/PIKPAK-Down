@@ -22,7 +22,7 @@ docker compose up --build        # 使用当前目录 docker-compose.yml
 docker compose -f compose.dev.yaml up --build
 ```
 
-CI 会把镜像推送到 `ghcr.io/kanotis/pikpak-down`；生产环境可直接拉取：
+CI 会把镜像推送到 `ghcr.io/kanotis/pikpak-share-suite`；生产环境可直接拉取：
 
 ```bash
 docker compose pull && docker compose up -d
@@ -35,10 +35,10 @@ docker compose pull && docker compose up -d
 `.github/workflows/docker.yml` 在推送到 `master` / `main`、打 `v*` 标签或手动触发时构建 `linux/amd64` 镜像并推送到 GHCR：
 
 ```text
-ghcr.io/kanotis/pikpak-down:latest
-ghcr.io/kanotis/pikpak-down:master
-ghcr.io/kanotis/pikpak-down:sha-<commit>
-ghcr.io/kanotis/pikpak-down:<version>   # v1.2.3 标签
+ghcr.io/kanotis/pikpak-share-suite:latest
+ghcr.io/kanotis/pikpak-share-suite:master
+ghcr.io/kanotis/pikpak-share-suite:sha-<commit>
+ghcr.io/kanotis/pikpak-share-suite:<version>   # v1.2.3 标签
 ```
 
 Pull Request 只构建、不推送。首次推送后到仓库的 Packages 页面把包可见性设为 Private/Public 即可。

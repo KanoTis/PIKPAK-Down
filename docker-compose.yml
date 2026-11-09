@@ -2,7 +2,7 @@ name: pikpak-down
 
 services:
   app:
-    image: ${PIKPAK_IMAGE:-ghcr.io/kanotis/pikpak-down:latest}
+    image: ${PIKPAK_IMAGE:-ghcr.io/kanotis/pikpak-share-suite:latest}
     build:
       context: .
     ports:
