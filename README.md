@@ -63,7 +63,7 @@ pnpm --dir frontend gen:api
 
 ## 配置
 
-必填 `APP_SECRET_KEY`（base64url 32 字节）；数据目录默认 `/data`，SQLite 位于 `/data/pikpak.db`。其余配置见 `.env.example`。
+必填 `APP_SECRET_KEY`（base64url 32 字节）；数据目录默认 `/data`，SQLite 位于 `/data/pikpak.db`。`DOWNLOAD_MAX_CONCURRENCY`、`ARIA2_SPLIT`、`LINEAGE_MAX_*` 等都可省略，代码默认值与 `.env.example` 一致；也可在 `/settings` 页面运行时调整并持久化。
 
 启动时创建 `/data/{tmp,files,evidence,state}` 并执行 Alembic migration。只运行一个 Uvicorn worker，调度器与 aria2 都在同一进程生命周期内管理。
 
