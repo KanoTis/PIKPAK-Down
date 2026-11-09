@@ -1,0 +1,26 @@
+name: pikpak-down
+
+services:
+  app:
+    image: ${PIKPAK_IMAGE:-ghcr.io/kanotis/pikpak-down:latest}
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - pikpak-data:/data
+    environment:
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?set APP_SECRET_KEY to a base64url 32-byte key}
+      PIKPAK_DRIVE_BASE_URL: ${PIKPAK_DRIVE_BASE_URL:-https://api-drive.mypikpak.com}
+      PIKPAK_USER_BASE_URL: ${PIKPAK_USER_BASE_URL:-https://user.mypikpak.com}
+      DOWNLOAD_MAX_CONCURRENCY: ${DOWNLOAD_MAX_CONCURRENCY:-2}
+      ARIA2_SPLIT: ${ARIA2_SPLIT:-8}
+      ARIA2_MAX_CONNECTION_PER_SERVER: ${ARIA2_MAX_CONNECTION_PER_SERVER:-8}
+      LINEAGE_MAX_ITEMS: ${LINEAGE_MAX_ITEMS:-50000}
+      LINEAGE_MAX_REQUESTS: ${LINEAGE_MAX_REQUESTS:-2000}
+      LINEAGE_MAX_SHARES: ${LINEAGE_MAX_SHARES:-200}
+      LINEAGE_MAX_FOLDERS: ${LINEAGE_MAX_FOLDERS:-2000}
+    restart: unless-stopped
+
+volumes:
+  pikpak-data:

@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+data
+data-dev
+frontend/node_modules
+frontend/dist
+tools
+backend/tests
+.env
+*.db
+*.db-wal
+*.db-shm

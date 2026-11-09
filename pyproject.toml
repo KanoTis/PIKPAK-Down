@@ -1,0 +1,39 @@
+[project]
+name = "pikpak-share-suite"
+version = "0.1.0"
+description = "PikPak share downloader and lineage tracing web app"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.135,<1",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "aiosqlite>=0.20",
+    "alembic>=1.14",
+    "httpx>=0.28",
+    "pydantic-settings>=2.7",
+    "apscheduler>=3.11,<4",
+    "cryptography>=44",
+    "tenacity>=9",
+    "aiolimiter>=1.2",
+    "structlog>=25",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "respx>=0.22",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
