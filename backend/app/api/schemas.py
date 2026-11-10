@@ -26,6 +26,7 @@ class SharePreviewRequest(BaseModel):
     folder_id: str | None = None
     folder_name: str | None = None
     page_token: str | None = None
+    fetch_all: bool | None = None
 
 
 class PreviewItemOut(BaseModel):

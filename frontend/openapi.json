@@ -3164,6 +3164,17 @@
               }
             ],
             "title": "Page Token"
+          },
+          "fetch_all": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fetch All"
           }
         },
         "type": "object",

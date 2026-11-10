@@ -11,7 +11,18 @@ import {
   Text,
   TextField,
 } from "@radix-ui/themes";
-import { ChevronRight, Download, File, Folder, Plus, Trash2, X } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  ChevronRight,
+  Download,
+  File,
+  Folder,
+  Plus,
+  Trash2,
+  X,
+} from "lucide-react";
 import {
   client,
   errorMessage,
@@ -38,6 +49,52 @@ interface DownloadTargets {
   items: { path: string; label: string }[];
 }
 
+type SortKey = "name" | "kind" | "size";
+type SortDir = "asc" | "desc";
+
+function compareItems(a: PreviewItem, b: PreviewItem, key: SortKey): number {
+  if (key === "name") {
+    return a.name.localeCompare(b.name, "zh-CN", {
+      numeric: true,
+      sensitivity: "base",
+    });
+  }
+  if (key === "kind") {
+    const rank = (item: PreviewItem) =>
+      item.kind === "drive#folder" ? 0 : item.is_video ? 1 : 2;
+    return rank(a) - rank(b);
+  }
+  const aFolder = a.kind === "drive#folder";
+  const bFolder = b.kind === "drive#folder";
+  if (aFolder !== bFolder) return aFolder ? 1 : -1;
+  return (a.size ?? 0) - (b.size ?? 0);
+}
+
+function SortHeader({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: SortDir;
+  onClick: () => void;
+}) {
+  const Icon = active ? (dir === "asc" ? ArrowUp : ArrowDown) : ArrowUpDown;
+  return (
+    <button
+      type="button"
+      className={`sort-header${active ? " is-active" : ""}`}
+      onClick={onClick}
+      aria-sort={active ? (dir === "asc" ? "ascending" : "descending") : "none"}
+    >
+      {label}
+      <Icon size={12} aria-hidden />
+    </button>
+  );
+}
+
 function joinPath(parent: string, name: string): string {
   return parent ? `${parent}/${name}` : name;
 }
@@ -56,6 +113,8 @@ export function DownloadsPage() {
   const [previewLoading, setPreviewLoading] = useState(false);
   const [folderLoading, setFolderLoading] = useState(false);
   const [targetSubdir, setTargetSubdir] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
 
   const targetsQuery = useQuery({
     queryKey: ["download-targets"],
@@ -172,29 +231,6 @@ export function DownloadsPage() {
     }
   };
 
-  const loadMore = async () => {
-    if (!preview || !preview.next_page_token) return;
-    setFolderLoading(true);
-    try {
-      const result = (await unwrap(
-        await client.POST("/api/share-preview", {
-          body: {
-            url: url.trim(),
-            pass_code: passCode.trim() || undefined,
-            folder_id: preview.folder_id ?? undefined,
-            folder_name: preview.folder_name ?? undefined,
-            page_token: preview.next_page_token,
-          },
-        }),
-      )) as SharePreview;
-      setPreview({ ...result, items: [...preview.items, ...result.items] });
-    } catch (error) {
-      setFormError(errorMessage(error));
-    } finally {
-      setFolderLoading(false);
-    }
-  };
-
   const goCrumb = async (index: number) => {
     if (index === 0) {
       if (rootPreview) {
@@ -276,6 +312,24 @@ export function DownloadsPage() {
       }
       return next;
     });
+  };
+
+  const sortedItems = useMemo(() => {
+    const items = [...(preview?.items ?? [])];
+    items.sort((a, b) => {
+      const result = compareItems(a, b, sortKey);
+      return sortDir === "asc" ? result : -result;
+    });
+    return items;
+  }, [preview, sortKey, sortDir]);
+
+  const changeSort = (key: SortKey) => {
+    if (key === sortKey) {
+      setSortDir((current) => (current === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
   };
 
   const selectedItems = Array.from(selected.values());
@@ -435,13 +489,34 @@ export function DownloadsPage() {
                       aria-label="全选当前目录"
                     />
                   </Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell>名称</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell>类型</Table.ColumnHeaderCell>
-                  <Table.ColumnHeaderCell>大小</Table.ColumnHeaderCell>
+                  <Table.ColumnHeaderCell>
+                    <SortHeader
+                      label="名称"
+                      active={sortKey === "name"}
+                      dir={sortDir}
+                      onClick={() => changeSort("name")}
+                    />
+                  </Table.ColumnHeaderCell>
+                  <Table.ColumnHeaderCell>
+                    <SortHeader
+                      label="类型"
+                      active={sortKey === "kind"}
+                      dir={sortDir}
+                      onClick={() => changeSort("kind")}
+                    />
+                  </Table.ColumnHeaderCell>
+                  <Table.ColumnHeaderCell>
+                    <SortHeader
+                      label="大小"
+                      active={sortKey === "size"}
+                      dir={sortDir}
+                      onClick={() => changeSort("size")}
+                    />
+                  </Table.ColumnHeaderCell>
                 </Table.Row>
               </Table.Header>
               <Table.Body>
-                {preview.items.map((item) => {
+                {sortedItems.map((item) => {
                   const isFolder = item.kind === "drive#folder";
                   return (
                     <Table.Row key={item.id}>
@@ -492,7 +567,15 @@ export function DownloadsPage() {
                           {isFolder ? "文件夹" : item.is_video ? "视频" : "文件"}
                         </Badge>
                       </Table.Cell>
-                      <Table.Cell>{isFolder ? "—" : formatBytes(item.size)}</Table.Cell>
+                      <Table.Cell>
+                        {isFolder ? (
+                          <Text size="1" color="gray" title="PikPak 不返回文件夹大小；需要递归枚举才能统计">
+                            —
+                          </Text>
+                        ) : (
+                          formatBytes(item.size)
+                        )}
+                      </Table.Cell>
                     </Table.Row>
                   );
                 })}
@@ -508,14 +591,6 @@ export function DownloadsPage() {
               </Table.Body>
             </Table.Root>
           </div>
-
-          {preview.next_page_token ? (
-            <Flex justify="center" mt="3">
-              <Button variant="soft" onClick={() => void loadMore()} disabled={folderLoading}>
-                {folderLoading ? "加载中…" : "加载更多"}
-              </Button>
-            </Flex>
-          ) : null}
 
           <div className="target-picker">
             <label>

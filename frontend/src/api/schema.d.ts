@@ -972,6 +972,8 @@ export interface components {
             folder_name?: string | null;
             /** Page Token */
             page_token?: string | null;
+            /** Fetch All */
+            fetch_all?: boolean | null;
         };
         /** TaskListOut */
         TaskListOut: {

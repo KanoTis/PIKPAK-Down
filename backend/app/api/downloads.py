@@ -172,6 +172,7 @@ async def share_preview(body: SharePreviewRequest) -> SharePreviewOut:
             folder_id=body.folder_id,
             folder_name=body.folder_name,
             page_token=body.page_token,
+            fetch_all=body.fetch_all if body.fetch_all is not None else True,
         )
     except ValueError as exc:
         raise _error(400, "INVALID_SHARE_URL", str(exc)) from exc
