@@ -630,14 +630,21 @@ class AccountPikPakClient(_BaseClient):
         return response.json()
 
     async def create_folder(
-        self, name: str, parent_id: str = "*"
+        self, name: str, parent_id: str | None = None
     ) -> dict[str, Any]:
+        # PIKPAK root is the empty parent id; "*" is only valid for listing.
         response = await self._drive(
             "POST",
             "/drive/v1/files",
-            json_body={"kind": "drive#folder", "parent_id": parent_id, "name": name},
+            json_body={
+                "kind": "drive#folder",
+                "parent_id": parent_id or "",
+                "name": name,
+            },
         )
-        return response.json()
+        payload = response.json()
+        # PIKPAK wraps the new folder in {"file": {...}}.
+        return payload.get("file") or payload
 
     async def move_files(self, ids: list[str], parent_id: str) -> dict[str, Any]:
         response = await self._drive(
