@@ -1539,6 +1539,7 @@ async def _handoff_with_account(
                     _set_status(task, TaskStatus.WCL_READY)
             await session.commit()
             return
+    await session.commit()
     await client.ensure_access_token()
     about = await client.about()
     await update_quota_from_about(account, about)
@@ -1871,6 +1872,7 @@ async def _cleanup_stale_tar_folders(
                     else:
                         task.tar_folder_id = None
             removed += 1
+            await session.commit()
         page_token = data.get("next_page_token") or None
         if not page_token:
             break

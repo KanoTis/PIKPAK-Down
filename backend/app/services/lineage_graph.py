@@ -365,6 +365,7 @@ async def _seed_selected_items(
     ]
     infos: dict[str, FileNode] = {}
     if file_ids and await _consume_request(session, run):
+        await session.commit()
         try:
             rows = await client.batch_file_info(
                 share.share_id, file_ids[:100], token or ""
@@ -533,6 +534,7 @@ async def _resolve_trace_refs(
             share.state = SHARE_STATE_BUDGET
             await session.flush()
             return
+        await session.commit()
         try:
             node = await client.file_info(share.share_id, file_id, token)
         except Exception as exc:  # noqa: BLE001

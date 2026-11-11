@@ -428,6 +428,8 @@ async def _get_snapshot(
         return _snapshot_from_row(row)
     if not await _consume_request(session, run):
         return None
+    # Release SQLite's single write lock before the network round trip.
+    await session.commit()
     try:
         snapshot = await client.get_share(share_id, pass_code)
     except (PikPakError, NotFound) as exc:
