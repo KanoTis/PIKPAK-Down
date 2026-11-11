@@ -2978,6 +2978,10 @@
             "type": "integer",
             "title": "Download Max Concurrency"
           },
+          "download_plan_concurrency": {
+            "type": "integer",
+            "title": "Download Plan Concurrency"
+          },
           "task_connections": {
             "type": "integer",
             "title": "Task Connections"
@@ -3006,6 +3010,7 @@
         "type": "object",
         "required": [
           "download_max_concurrency",
+          "download_plan_concurrency",
           "task_connections",
           "duplicate_name_policy",
           "lineage_max_items",
@@ -3029,6 +3034,19 @@
               }
             ],
             "title": "Download Max Concurrency"
+          },
+          "download_plan_concurrency": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 16.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Download Plan Concurrency"
           },
           "task_connections": {
             "anyOf": [

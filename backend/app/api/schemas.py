@@ -204,6 +204,7 @@ class ErrorBody(BaseModel):
 
 class RuntimeSettingsOut(BaseModel):
     download_max_concurrency: int
+    download_plan_concurrency: int
     task_connections: int
     duplicate_name_policy: str
     lineage_max_items: int
@@ -214,6 +215,7 @@ class RuntimeSettingsOut(BaseModel):
 
 class RuntimeSettingsUpdate(BaseModel):
     download_max_concurrency: int | None = Field(None, ge=1, le=16)
+    download_plan_concurrency: int | None = Field(None, ge=1, le=16)
     task_connections: int | None = Field(None, ge=1, le=16)
     duplicate_name_policy: str | None = None
     lineage_max_items: int | None = Field(None, ge=1000, le=1_000_000)

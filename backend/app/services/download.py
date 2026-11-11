@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..aria2 import Aria2Error, aria2
 from ..config import get_settings
+from ..db import get_session_factory
 from ..models import (
     Account,
     DownloadFolder,
@@ -58,6 +59,7 @@ from .windows import probe_tail_exact, probe_with_retries
 log = structlog.get_logger(__name__)
 
 _dispatch_lock = asyncio.Lock()
+_plan_claim_lock = asyncio.Lock()
 
 
 class StateConflict(Exception):
@@ -842,34 +844,49 @@ async def _dispatch_plans(session: AsyncSession) -> None:
     slots = max(0, settings.download_max_concurrency - active)
     if slots <= 0:
         return
-    tasks = (
+    workers = min(settings.download_plan_concurrency, slots)
+    if workers <= 0:
+        return
+    task_ids = (
         await session.execute(
-            select(DownloadTask)
+            select(DownloadTask.id)
             .join(DownloadJob, DownloadTask.job_id == DownloadJob.id)
             .where(
                 DownloadTask.status.in_([TaskStatus.DISCOVERED, TaskStatus.PLANNING]),
                 DownloadJob.status.notin_([JobStatus.CANCELLED, JobStatus.FAILED]),
             )
             .order_by(DownloadTask.sort_index.asc())
-            .limit(slots)
+            .limit(workers)
         )
     ).scalars().all()
-    if not tasks:
+    if not task_ids:
         return
+
+    factory = get_session_factory()
     client = AnonymousPikPakClient()
-    try:
-        for task in tasks:
+
+    async def plan_one(task_id: str) -> None:
+        async with factory() as worker_session:
+            task = await worker_session.get(DownloadTask, task_id)
+            if task is None or task.status not in (
+                TaskStatus.DISCOVERED,
+                TaskStatus.PLANNING,
+            ):
+                return
             try:
-                await _plan_task(session, task, client)
+                await _plan_task(worker_session, task, client)
             except RateLimited:
-                await session.rollback()
-                task = await session.get(DownloadTask, task.id)
+                await worker_session.rollback()
+                task = await worker_session.get(DownloadTask, task_id)
                 if task is not None and task.status == TaskStatus.PLANNING:
                     _set_status(task, TaskStatus.DISCOVERED)
-                await session.commit()
+                await worker_session.commit()
             except Exception:  # noqa: BLE001
-                log.exception("plan_task_failed", task_id=task.id)
-                await session.rollback()
+                log.exception("plan_task_failed", task_id=task_id)
+                await worker_session.rollback()
+
+    try:
+        await asyncio.gather(*(plan_one(task_id) for task_id in task_ids))
     finally:
         await client.close()
 
@@ -914,6 +931,34 @@ async def _try_local_reuse(
 
     if target.exists():
         return False
+
+    active_target = (
+        await session.execute(
+            select(DownloadTask.id)
+            .where(
+                DownloadTask.id != task.id,
+                DownloadTask.target_path == relative,
+                DownloadTask.status.in_(
+                    [
+                        TaskStatus.PLANNING,
+                        TaskStatus.ANON_DOWNLOADING,
+                        TaskStatus.ACCOUNT_DOWNLOADING,
+                        TaskStatus.ACCOUNT_QUEUED,
+                        TaskStatus.RESTORING,
+                        TaskStatus.WCL_READY,
+                        TaskStatus.VERIFYING,
+                    ]
+                ),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if active_target is not None:
+        task.queue_reason = "TARGET_BUSY"
+        if task.status != TaskStatus.DISCOVERED:
+            _set_status(task, TaskStatus.DISCOVERED)
+        await session.commit()
+        return True
 
     active_copy = (
         await session.execute(
@@ -1004,12 +1049,12 @@ async def _plan_task(
     if job is None:
         return
 
-    if await _try_local_reuse(session, job, task):
-        return
-
-    _set_status(task, TaskStatus.PLANNING)
-    task.attempts += 1
-    await session.commit()
+    async with _plan_claim_lock:
+        if await _try_local_reuse(session, job, task):
+            return
+        _set_status(task, TaskStatus.PLANNING)
+        task.attempts += 1
+        await session.commit()
 
     token = decrypt(job.pass_code_token_enc)
     try:

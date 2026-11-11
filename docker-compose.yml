@@ -13,6 +13,7 @@ services:
       - ${CACHE_HOST_DIR:-./cache}:/cache
     environment:
       APP_SECRET_KEY: ${APP_SECRET_KEY:?set APP_SECRET_KEY to a base64url 32-byte key}
+      DOWNLOAD_PLAN_CONCURRENCY: ${DOWNLOAD_PLAN_CONCURRENCY:-4}
       ANON_API_QPS: ${ANON_API_QPS:-5}
       SHARE_PROBE_QPS: ${SHARE_PROBE_QPS:-2}
       WINDOW_PROBE_QPS: ${WINDOW_PROBE_QPS:-2}

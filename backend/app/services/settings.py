@@ -13,6 +13,7 @@ log = structlog.get_logger(__name__)
 
 ACTUAL_KEYS: dict[str, tuple[int, int]] = {
     "download_max_concurrency": (1, 16),
+    "download_plan_concurrency": (1, 16),
     "aria2_split": (1, 16),
     "aria2_max_connection_per_server": (1, 16),
     "lineage_max_items": (1000, 1_000_000),
@@ -23,6 +24,7 @@ ACTUAL_KEYS: dict[str, tuple[int, int]] = {
 
 API_KEYS = (
     "download_max_concurrency",
+    "download_plan_concurrency",
     "task_connections",
     "duplicate_name_policy",
     "lineage_max_items",
@@ -49,6 +51,7 @@ def snapshot() -> dict[str, Any]:
     settings = get_settings()
     return {
         "download_max_concurrency": settings.download_max_concurrency,
+        "download_plan_concurrency": settings.download_plan_concurrency,
         "task_connections": settings.aria2_split,
         "duplicate_name_policy": settings.duplicate_name_policy,
         "lineage_max_items": settings.lineage_max_items,

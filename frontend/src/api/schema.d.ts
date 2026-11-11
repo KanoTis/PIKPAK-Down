@@ -923,6 +923,8 @@ export interface components {
         RuntimeSettingsOut: {
             /** Download Max Concurrency */
             download_max_concurrency: number;
+            /** Download Plan Concurrency */
+            download_plan_concurrency: number;
             /** Task Connections */
             task_connections: number;
             /** Duplicate Name Policy */
@@ -940,6 +942,8 @@ export interface components {
         RuntimeSettingsUpdate: {
             /** Download Max Concurrency */
             download_max_concurrency?: number | null;
+            /** Download Plan Concurrency */
+            download_plan_concurrency?: number | null;
             /** Task Connections */
             task_connections?: number | null;
             /** Duplicate Name Policy */

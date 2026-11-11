@@ -680,3 +680,53 @@ async def test_duplicate_content_does_not_download_twice(env, fake_server) -> No
         item for item in state["cdn_requests"] if "aria2" in item["ua"].lower()
     ]
     assert len(aria2_requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_plans_runs_concurrently(env, fake_server, monkeypatch) -> None:
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus, utcnow
+    from app.services import download
+
+    env.download_max_concurrency = 8
+    env.download_plan_concurrency = 4
+
+    factory = get_session_factory()
+    async with factory() as session:
+        for index in range(4):
+            job = DownloadJob(
+                input_url=f"https://mypikpak.com/s/PLAN{index:04d}",
+                share_id=f"PLAN{index:04d}",
+                status=JobStatus.READY,
+            )
+            session.add(job)
+            await session.flush()
+            session.add(
+                DownloadTask(
+                    job_id=job.id,
+                    share_file_id=f"PLANFILE{index:04d}",
+                    name=f"plan-{index}.bin",
+                    size=1,
+                    status=TaskStatus.DISCOVERED,
+                )
+            )
+        await session.commit()
+
+    active = 0
+    peak = 0
+
+    async def fake_plan(session, task, client):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.15)
+        task.status = TaskStatus.DONE
+        task.finished_at = utcnow()
+        await session.commit()
+        active -= 1
+
+    monkeypatch.setattr(download, "_plan_task", fake_plan)
+    async with factory() as session:
+        await download._dispatch_plans(session)
+
+    assert peak == 4

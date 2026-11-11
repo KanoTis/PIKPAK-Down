@@ -10,6 +10,7 @@ type DuplicatePolicy = "rename" | "overwrite" | "skip";
 
 interface RuntimeSettings {
   download_max_concurrency: number;
+  download_plan_concurrency: number;
   task_connections: number;
   duplicate_name_policy: DuplicatePolicy;
   lineage_max_items: number;
@@ -32,6 +33,13 @@ const FIELDS: {
     key: "download_max_concurrency",
     label: "任务并发",
     hint: "同时进行的下载文件数，调低不会中断已开始的任务。",
+    min: 1,
+    max: 16,
+  },
+  {
+    key: "download_plan_concurrency",
+    label: "文件规划并发",
+    hint: "同时解析文件元数据的数量；受任务并发槽位限制，建议与任务并发设为相同值。",
     min: 1,
     max: 16,
   },
@@ -164,7 +172,7 @@ export function SettingsPage() {
           <Text as="div" size="1" color="gray" mb="4">
             控制调度器与 aria2 的并发参数。
           </Text>
-          {FIELDS.slice(0, 2).map((field) => (
+          {FIELDS.slice(0, 3).map((field) => (
             <SettingField
               key={field.key}
               field={field}
@@ -208,7 +216,7 @@ export function SettingsPage() {
           <Text as="div" size="1" color="gray" mb="4">
             预算按层级推进；修改后从下一次检查起生效。
           </Text>
-          {FIELDS.slice(2).map((field) => (
+          {FIELDS.slice(3).map((field) => (
             <SettingField
               key={field.key}
               field={field}

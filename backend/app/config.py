@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     pikpak_user_base_url: str = "https://user.mypikpak.com"
 
     download_max_concurrency: int = 2
+    download_plan_concurrency: int = 4
     aria2_split: int = 8
     aria2_max_connection_per_server: int = 8
     aria2_min_split_size: str = "8M"
