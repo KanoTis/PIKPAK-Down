@@ -54,7 +54,7 @@ from .accounts import (
 from .cleanup import enqueue_cleanup
 from .planner import DownloadPlan, anonymous_plan
 from .verifier import extract_tar_member, verify_file
-from .windows import probe_tail_exact, probe_with_retries
+from .windows import probe_tail_exact, probe_three_points, probe_with_retries
 
 log = structlog.get_logger(__name__)
 
@@ -1361,6 +1361,17 @@ async def run_account_handoff(session: AsyncSession, task_id: str) -> None:
         await client.close()
 
 
+async def _tar_multipart_allowed(url: str, size: int) -> bool:
+    if size <= 0:
+        return False
+    try:
+        return await probe_three_points(
+            url, size, limiter=await window_limiter()
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
 async def _handoff_via_tar(
     session: AsyncSession,
     job: DownloadJob,
@@ -1452,6 +1463,14 @@ async def _handoff_via_tar(
     await release_account(session, account.id, task.id)
     await session.commit()
 
+    multipart = await _tar_multipart_allowed(wcl, tar_size)
+    events.emit(
+        session,
+        "download_task",
+        task.id,
+        "download_task.tar_multipart_checked",
+        {"multipart": multipart, "size": tar_size},
+    )
     try:
         await _start_aria2(
             session,
@@ -1459,7 +1478,7 @@ async def _handoff_via_tar(
             wcl,
             TaskStatus.ACCOUNT_DOWNLOADING,
             size=tar_size,
-            single_connection=True,
+            single_connection=not multipart,
         )
     except PikPakError as exc:
         task.error_code = exc.code or "ARIA2_UNAVAILABLE"
@@ -1507,6 +1526,11 @@ async def _handoff_with_account(
                     _set_status(task, TaskStatus.ACCOUNT_QUEUED)
                 await session.commit()
                 return
+            multipart = (
+                await _tar_multipart_allowed(wcl, expected_size)
+                if task.route == "tar"
+                else False
+            )
             try:
                 await _start_aria2(
                     session,
@@ -1514,7 +1538,7 @@ async def _handoff_with_account(
                     wcl,
                     TaskStatus.ACCOUNT_DOWNLOADING,
                     size=expected_size,
-                    single_connection=task.route == "tar",
+                    single_connection=not multipart,
                 )
             except PikPakError as exc:
                 task.error_code = exc.code or "ARIA2_UNAVAILABLE"

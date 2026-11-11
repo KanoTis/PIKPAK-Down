@@ -137,7 +137,7 @@ uv run pytest backend/tests/integration -q
 - 设置页：`/settings`，调整任务并发（1–16）、文件规划并发（1–16）、单任务连接数（aria2 split / 每服务器连接，1–16）、血缘条目/请求/分享/目录预算；保存后立即生效并跨重启保留。
 - 文件夹大小：PikPak 列表接口对文件夹只返回 0，真实大小需要递归枚举；预览默认显示 `—`，不阻塞列表加载。
 - 同名冲突：目标目录已有同名文件且哈希不同，按设置处理：`rename` 保留两份，`overwrite` 覆盖，`skip` 保留已有文件并在任务上标记 `DUPLICATE_SKIPPED`。
-- 日下行配额：账号普通文件签发遇到 `daily_download_size_exceeded` 时，自动走 tar 归档通道：restore 副本 → 专用目录 → `files/pack` → 轮询 pack 任务 → 签发 tar 直链（配额检查豁免）→ 单连接下载 tar → 本地解包首条文件 → 按原始 `size + Merkle-gcid` 校验。tar 下载在任务详情中显示为 `tar 通道`。
+- tar 多线程：tar 链接的 Range 行为未在原文档中稳定验证，因此每次签发后先探测 `bytes=0`、`bytes=mid`、`bytes=last`；三点都返回精确 206 才启用多连接，否则自动退回单连接。账号普通文件签发遇到 `daily_download_size_exceeded` 时，自动走 tar 归档通道：restore 副本 → 专用目录 → `files/pack` → 轮询 pack 任务 → 签发 tar 直链（配额检查豁免）→ tar 直链先做 0/中间/末尾三点 Range 探针：都返回 206 才用 `ARIA2_SPLIT` 多连接，否则单连接兜底 → 本地解包首条文件 → 按原始 `size + Merkle-gcid` 校验。tar 下载在任务详情中显示为 `tar 通道`。
 - 失败重试：下载页「失败」分类提供「一键重试全部失败」，任务子页提供「一键重试失败文件」；只重置失败/取消的文件，不重新下载已完成文件。
 - 下载结构：最终文件写入 `DOWNLOADS_DIR/<target_subdir>/<分享相对路径>`，文件夹选择保留子树；临时文件在 `CACHE_DIR/<task-id>/download.bin`，成功后原子移动/跨挂载复制，失败或取消时删除。
 - 后端测试：`46 passed`（captcha 向量、Merkle 向量、窗口并集、下载/转存/删除顺序、清理重试、匿名/账号/文件夹下载、预览与勾选下载、嵌套目录选择、断点重启、状态机、错误契约、血缘直系/文件夹/tenant refs/窗口、全量图 BFS 去重与图 API）。

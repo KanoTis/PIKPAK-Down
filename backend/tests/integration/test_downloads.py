@@ -791,9 +791,13 @@ async def test_tar_fallback_packs_and_starts_single_connection(env, fake_server,
         task.status = TaskStatus.ACCOUNT_DOWNLOADING
         await session.commit()
 
+    async def fake_probe(url, size):
+        return False
+
     monkeypatch.setattr(download, "_delete_drive_file", fake_delete)
     monkeypatch.setattr(download, "release_account", fake_release)
     monkeypatch.setattr(download, "_start_aria2", fake_start)
+    monkeypatch.setattr(download, "_tar_multipart_allowed", fake_probe)
 
     factory = get_session_factory()
     async with factory() as session:
