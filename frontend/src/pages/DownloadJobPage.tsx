@@ -1,4 +1,4 @@
-import { useDeferredValue, useState } from "react";
+import { useDeferredValue, useEffect, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "@tanstack/react-router";
 import {
@@ -7,12 +7,12 @@ import {
   Card,
   Flex,
   Progress,
-  Select,
   Table,
   Text,
   TextField,
 } from "@radix-ui/themes";
 import { ArrowLeft, Download, Pause, Play, RotateCcw, X } from "lucide-react";
+
 import {
   client,
   errorMessage,
@@ -28,20 +28,13 @@ import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 
-const STATES = [
-  "ALL",
-  "DISCOVERED",
-  "PLANNING",
-  "ANON_DOWNLOADING",
-  "ACCOUNT_QUEUED",
-  "RESTORING",
-  "WCL_READY",
-  "ACCOUNT_DOWNLOADING",
-  "VERIFYING",
-  "PAUSED",
-  "DONE",
-  "FAILED",
-  "CANCELLED",
+type TaskCategory = "downloading" | "queued" | "failed" | "success";
+
+const TASK_TABS: { key: TaskCategory; label: string }[] = [
+  { key: "downloading", label: "下载" },
+  { key: "queued", label: "队列" },
+  { key: "failed", label: "失败" },
+  { key: "success", label: "成功" },
 ];
 
 async function taskAction(taskId: string, action: "pause" | "resume" | "retry" | "cancel") {
@@ -60,7 +53,7 @@ async function taskAction(taskId: string, action: "pause" | "resume" | "retry" |
 export function DownloadJobPage() {
   const { jobId } = useParams({ from: "/downloads/$jobId" });
   const queryClient = useQueryClient();
-  const [state, setState] = useState("ALL");
+  const [category, setCategory] = useState<TaskCategory>("downloading");
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -74,7 +67,7 @@ export function DownloadJobPage() {
   });
 
   const filesQuery = useInfiniteQuery({
-    queryKey: ["job-files", jobId, state, deferredSearch],
+    queryKey: ["job-files", jobId, category, deferredSearch],
     initialPageParam: null as string | null,
     queryFn: async ({ pageParam }) =>
       unwrap(
@@ -84,7 +77,7 @@ export function DownloadJobPage() {
             query: {
               limit: 50,
               cursor: pageParam ?? undefined,
-              state: state === "ALL" ? undefined : state,
+              category,
               q: deferredSearch.trim() || undefined,
             },
           },
@@ -117,6 +110,19 @@ export function DownloadJobPage() {
 
   const job = jobQuery.data;
   const tasks = filesQuery.data?.pages.flatMap((page) => page.items) ?? [];
+  const initializedCategory = useRef(false);
+
+  useEffect(() => {
+    if (!job || initializedCategory.current) return;
+    initializedCategory.current = true;
+    if (job.status === "COMPLETED" || job.status === "COMPLETED_WITH_ERRORS") {
+      setCategory("success");
+    } else if (job.status === "FAILED" || job.status === "CANCELLED") {
+      setCategory("failed");
+    } else if ((job.active_files ?? 0) === 0 && (job.queued_files ?? 0) > 0) {
+      setCategory("queued");
+    }
+  }, [job]);
 
   if (jobQuery.isLoading) {
     return <Text color="gray">加载中…</Text>;
@@ -126,6 +132,12 @@ export function DownloadJobPage() {
   }
 
   const terminal = ["COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED", "CANCELLED"].includes(job.status);
+  const categoryCounts: Record<TaskCategory, number> = {
+    downloading: job.active_files ?? 0,
+    queued: job.queued_files ?? 0,
+    failed: (job.failed_files ?? 0) + (job.cancelled_files ?? 0),
+    success: job.completed_files ?? 0,
+  };
 
   return (
     <>
@@ -198,6 +210,25 @@ export function DownloadJobPage() {
         </Card>
       </div>
 
+      <div className="job-tabs" role="tablist" aria-label="文件分类">
+        {TASK_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={category === tab.key}
+            className={`job-tab${category === tab.key ? " is-active" : ""}`}
+            onClick={() => {
+              setCategory(tab.key);
+              setExpanded(null);
+            }}
+          >
+            {tab.label}
+            <span>{categoryCounts[tab.key]}</span>
+          </button>
+        ))}
+      </div>
+
       <Card size="2" mb="4">
         <Flex gap="3" wrap="wrap" align="end">
           <label style={{ minWidth: 220 }}>
@@ -210,21 +241,6 @@ export function DownloadJobPage() {
               placeholder="输入文件名"
               type="search"
             />
-          </label>
-          <label>
-            <Text as="div" size="1" color="gray" mb="1">
-              状态过滤
-            </Text>
-            <Select.Root value={state} onValueChange={setState}>
-              <Select.Trigger aria-label="状态过滤" />
-              <Select.Content>
-                {STATES.map((item) => (
-                  <Select.Item key={item} value={item}>
-                    {item === "ALL" ? "全部状态" : item}
-                  </Select.Item>
-                ))}
-              </Select.Content>
-            </Select.Root>
           </label>
           <Badge variant="soft" color="gray">
             当前 {tasks.length} 项

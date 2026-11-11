@@ -583,3 +583,34 @@ async def test_duplicate_policy_rename_and_skip(env, fake_server) -> None:
     assert tasks[0].error_code == "DUPLICATE_SKIPPED"
     assert target.read_bytes() == b"old-different-content"
     settings.duplicate_name_policy = "rename"
+
+
+@pytest.mark.asyncio
+async def test_job_and_file_category_filters(env, fake_server) -> None:
+    from app.main import app
+
+    job_id = await create_job(f"https://mypikpak.com/s/{ACCOUNT_SHARE}")
+    job, tasks = await run_until(
+        job_id,
+        lambda job, tasks: bool(tasks) and tasks[0].status == "ACCOUNT_QUEUED",
+    )
+    assert tasks[0].queue_reason == "NO_ACCOUNT"
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30) as client:
+        listed = await client.get("/api/download-jobs")
+        assert listed.status_code == 200
+        body = [item for item in listed.json() if item["id"] == job_id][0]
+        assert body["category"] == "queued"
+        assert body["queued_files"] == 1
+
+        queued = await client.get(
+            f"/api/download-jobs/{job_id}/files", params={"category": "queued"}
+        )
+        assert queued.status_code == 200
+        assert [item["status"] for item in queued.json()["items"]] == ["ACCOUNT_QUEUED"]
+
+        downloading = await client.get(
+            f"/api/download-jobs/{job_id}/files", params={"category": "downloading"}
+        )
+        assert downloading.json()["items"] == []

@@ -70,7 +70,15 @@ def job_category(job: DownloadJob, task_states: list[str]) -> str:
     return "downloading"
 
 
-def job_out(job: DownloadJob, category: str | None = None) -> DownloadJobOut:
+def job_out(
+    job: DownloadJob,
+    category: str | None = None,
+    task_states: list[str] | None = None,
+) -> DownloadJobOut:
+    states = task_states or []
+    active_files = sum(1 for state in states if state in ACTIVE_STATES)
+    queued_files = sum(1 for state in states if state in QUEUED_STATES or state == "PAUSED")
+    cancelled_files = sum(1 for state in states if state == "CANCELLED")
     return DownloadJobOut(
         id=job.id,
         input_url=job.input_url,
@@ -80,10 +88,13 @@ def job_out(job: DownloadJob, category: str | None = None) -> DownloadJobOut:
         root_name=job.root_name,
         target_subdir=job.target_subdir,
         status=job.status,
-        category=category or job_category(job, []),
+        category=category or job_category(job, states),
         total_files=job.total_files,
         completed_files=job.completed_files,
         failed_files=job.failed_files,
+        cancelled_files=cancelled_files,
+        active_files=active_files,
+        queued_files=queued_files,
         total_bytes=job.total_bytes,
         downloaded_bytes=job.downloaded_bytes,
         folder_total=job.folder_total,
@@ -91,6 +102,7 @@ def job_out(job: DownloadJob, category: str | None = None) -> DownloadJobOut:
         error_code=job.error_code,
         error_message=job.error_message,
         created_at=iso(job.created_at),
+        updated_at=iso(job.updated_at),
         started_at=iso(job.started_at),
         finished_at=iso(job.finished_at),
     )
@@ -245,7 +257,10 @@ async def list_download_jobs(
     states: dict[str, list[str]] = {}
     for job_id, state, count in status_rows:
         states.setdefault(job_id, []).extend([state] * int(count))
-    return [job_out(job, job_category(job, states.get(job.id, []))) for job in rows]
+    return [
+        job_out(job, job_category(job, states.get(job.id, [])), states.get(job.id, []))
+        for job in rows
+    ]
 
 
 @router.get("/download-jobs/{job_id}", response_model=DownloadJobOut)
@@ -260,7 +275,7 @@ async def get_download_job(
             select(DownloadTask.status).where(DownloadTask.job_id == job.id)
         )
     ).scalars().all()
-    return job_out(job, job_category(job, list(task_states)))
+    return job_out(job, job_category(job, list(task_states)), list(task_states))
 
 
 def _parse_cursor(cursor: str | None) -> tuple[int, str] | None:
@@ -279,6 +294,7 @@ async def list_job_files(
     cursor: str | None = None,
     limit: int = Query(100, ge=1, le=200),
     state: str | None = None,
+    category: str | None = None,
     q: str | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> TaskListOut:
@@ -288,6 +304,19 @@ async def list_job_files(
     stmt = select(DownloadTask).where(DownloadTask.job_id == job_id)
     if state:
         stmt = stmt.where(DownloadTask.status == state)
+    if category:
+        if category == "downloading":
+            stmt = stmt.where(DownloadTask.status.in_(ACTIVE_STATES))
+        elif category == "queued":
+            stmt = stmt.where(
+                DownloadTask.status.in_(QUEUED_STATES | {"PAUSED"})
+            )
+        elif category == "failed":
+            stmt = stmt.where(DownloadTask.status.in_({"FAILED", "CANCELLED"}))
+        elif category == "success":
+            stmt = stmt.where(DownloadTask.status == "DONE")
+        else:
+            raise _error(400, "INVALID_CATEGORY", "未知任务分类")
     if q:
         stmt = stmt.where(DownloadTask.name.ilike(f"%{q}%"))
     parsed = _parse_cursor(cursor)

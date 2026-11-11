@@ -64,6 +64,9 @@ class DownloadJobOut(BaseModel):
     total_files: int
     completed_files: int
     failed_files: int
+    cancelled_files: int = 0
+    active_files: int = 0
+    queued_files: int = 0
     total_bytes: int
     downloaded_bytes: int
     folder_total: int
@@ -71,6 +74,7 @@ class DownloadJobOut(BaseModel):
     error_code: str | None = None
     error_message: str | None = None
     created_at: str | None = None
+    updated_at: str | None = None
     started_at: str | None = None
     finished_at: str | None = None
 

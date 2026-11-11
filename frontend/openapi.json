@@ -405,6 +405,22 @@
             }
           },
           {
+            "name": "category",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Category"
+            }
+          },
+          {
             "name": "q",
             "in": "query",
             "required": false,
@@ -2159,6 +2175,21 @@
             "type": "integer",
             "title": "Failed Files"
           },
+          "cancelled_files": {
+            "type": "integer",
+            "title": "Cancelled Files",
+            "default": 0
+          },
+          "active_files": {
+            "type": "integer",
+            "title": "Active Files",
+            "default": 0
+          },
+          "queued_files": {
+            "type": "integer",
+            "title": "Queued Files",
+            "default": 0
+          },
           "total_bytes": {
             "type": "integer",
             "title": "Total Bytes"
@@ -2207,6 +2238,17 @@
               }
             ],
             "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
           },
           "started_at": {
             "anyOf": [

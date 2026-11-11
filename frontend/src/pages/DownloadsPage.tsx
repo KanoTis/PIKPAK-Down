@@ -71,6 +71,63 @@ function categoryForJob(job: DownloadJob): JobCategory {
   return "success";
 }
 
+interface JobGroup {
+  shareId: string;
+  jobs: DownloadJob[];
+  latest: DownloadJob;
+  totalFiles: number;
+  completedFiles: number;
+  failedFiles: number;
+  totalBytes: number;
+  downloadedBytes: number;
+  folderTotal: number;
+  folderDone: number;
+  targetSubdirs: string[];
+}
+
+function groupJobs(jobs: DownloadJob[]): JobGroup[] {
+  const groups = new Map<string, DownloadJob[]>();
+  for (const job of jobs) {
+    const bucket = groups.get(job.share_id) ?? [];
+    bucket.push(job);
+    groups.set(job.share_id, bucket);
+  }
+  return Array.from(groups.entries())
+    .map(([shareId, group]) => {
+      const sorted = [...group].sort((a, b) =>
+        (b.updated_at ?? b.created_at ?? "").localeCompare(
+          a.updated_at ?? a.created_at ?? "",
+        ),
+      );
+      return {
+        shareId,
+        jobs: sorted,
+        latest: sorted[0],
+        totalFiles: sorted.reduce((sum, job) => sum + (job.total_files ?? 0), 0),
+        completedFiles: sorted.reduce(
+          (sum, job) => sum + (job.completed_files ?? 0),
+          0,
+        ),
+        failedFiles: sorted.reduce((sum, job) => sum + (job.failed_files ?? 0), 0),
+        totalBytes: sorted.reduce((sum, job) => sum + (job.total_bytes ?? 0), 0),
+        downloadedBytes: sorted.reduce(
+          (sum, job) => sum + (job.downloaded_bytes ?? 0),
+          0,
+        ),
+        folderTotal: sorted.reduce((sum, job) => sum + (job.folder_total ?? 0), 0),
+        folderDone: sorted.reduce((sum, job) => sum + (job.folder_done ?? 0), 0),
+        targetSubdirs: Array.from(
+          new Set(sorted.map((job) => job.target_subdir || "/")),
+        ),
+      };
+    })
+    .sort((a, b) =>
+      (b.latest.updated_at ?? b.latest.created_at ?? "").localeCompare(
+        a.latest.updated_at ?? a.latest.created_at ?? "",
+      ),
+    );
+}
+
 function compareItems(a: PreviewItem, b: PreviewItem, key: SortKey): number {
   if (key === "name") {
     return a.name.localeCompare(b.name, "zh-CN", {
@@ -150,13 +207,16 @@ export function DownloadsPage() {
     refetchInterval: 5000,
   });
 
-  const deleteJob = useMutation({
-    mutationFn: async (jobId: string) =>
-      unwrap(
-        await client.DELETE("/api/download-jobs/{job_id}", {
-          params: { path: { job_id: jobId } },
-        }),
-      ),
+  const deleteJobs = useMutation({
+    mutationFn: async (jobIds: string[]) => {
+      for (const jobId of jobIds) {
+        await unwrap(
+          await client.DELETE("/api/download-jobs/{job_id}", {
+            params: { path: { job_id: jobId } },
+          }),
+        );
+      }
+    },
     onSuccess: () => {
       setFormError(null);
       void queryClient.invalidateQueries({ queryKey: ["download-jobs"] });
@@ -362,13 +422,17 @@ export function DownloadsPage() {
   const jobGroups = Object.fromEntries(
     JOB_TABS.map((tab) => [
       tab.key,
-      jobs.filter((job) => categoryForJob(job) === tab.key),
+      groupJobs(jobs.filter((job) => categoryForJob(job) === tab.key)),
     ]),
-  ) as Record<JobCategory, DownloadJob[]>;
-  const visibleJobs = jobGroups[jobTab];
+  ) as Record<JobCategory, JobGroup[]>;
+  const visibleGroups = jobGroups[jobTab];
 
   const openJob = (job: DownloadJob) => {
     void navigate({ to: "/downloads/$jobId", params: { jobId: job.id } });
+  };
+
+  const deleteGroup = (group: JobGroup) => {
+    deleteJobs.mutate(group.jobs.map((job) => job.id));
   };
 
   return (
@@ -700,93 +764,117 @@ export function DownloadsPage() {
               </Table.Row>
             </Table.Header>
             <Table.Body>
-              {visibleJobs.map((job) => (
-                <Table.Row
-                  key={job.id}
-                  className="row-link"
-                  tabIndex={0}
-                  onClick={() => openJob(job)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") openJob(job);
-                  }}
-                >
-                  <Table.Cell>
-                    <Text as="div" weight="medium">
-                      {job.root_name || job.share_id}
-                    </Text>
-                    <Text as="div" size="1" color="gray" className="mono">
-                      {job.share_id}
-                    </Text>
-                    <Text as="div" size="1" color="gray">
-                      位置 /{job.target_subdir || ""}
-                    </Text>
-                  </Table.Cell>
-                  <Table.Cell>
-                    <StatusBadge status={job.status} />
-                    {job.error_code ? (
-                      <Text as="div" size="1" color="red" mt="1">
-                        {job.error_code}
+              {visibleGroups.map((group) => {
+                const latest = group.latest;
+                const allTerminal = group.jobs.every((job) =>
+                  ["COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED", "CANCELLED"].includes(
+                    job.status,
+                  ),
+                );
+                return (
+                  <Table.Row
+                    key={group.shareId}
+                    className="row-link"
+                    tabIndex={0}
+                    onClick={() => openJob(latest)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") openJob(latest);
+                    }}
+                  >
+                    <Table.Cell>
+                      <Flex align="center" gap="2" wrap="wrap">
+                        <Text as="div" weight="medium">
+                          {latest.root_name || group.shareId}
+                        </Text>
+                        {group.jobs.length > 1 ? (
+                          <Badge variant="soft" color="violet">
+                            {group.jobs.length} 个任务
+                          </Badge>
+                        ) : null}
+                      </Flex>
+                      <Text as="div" size="1" color="gray" className="mono">
+                        {group.shareId}
                       </Text>
-                    ) : null}
-                  </Table.Cell>
-                  <Table.Cell>
-                    <Flex align="center" gap="2">
-                      <Badge
-                        variant="soft"
-                        color={
-                          job.completed_files === job.total_files && job.total_files > 0
-                            ? "green"
-                            : "gray"
-                        }
-                      >
-                        {job.completed_files}/{job.total_files}
-                      </Badge>
+                      <Text as="div" size="1" color="gray">
+                        位置 {group.targetSubdirs.map((path) => `/${path || ""}`).join(" · ")}
+                      </Text>
+                    </Table.Cell>
+                    <Table.Cell>
+                      <StatusBadge status={latest.status} />
+                      {group.jobs.length > 1 ? (
+                        <Text as="div" size="1" color="gray" mt="1">
+                          点击打开最近任务；本行合并 {group.jobs.length} 个任务
+                        </Text>
+                      ) : null}
+                      {latest.error_code ? (
+                        <Text as="div" size="1" color="red" mt="1">
+                          {latest.error_code}
+                        </Text>
+                      ) : null}
+                    </Table.Cell>
+                    <Table.Cell>
+                      <Flex align="center" gap="2">
+                        <Badge
+                          variant="soft"
+                          color={
+                            group.completedFiles === group.totalFiles &&
+                            group.totalFiles > 0
+                              ? "green"
+                              : "gray"
+                          }
+                        >
+                          {group.completedFiles}/{group.totalFiles}
+                        </Badge>
+                        <Text size="1" color="gray">
+                          {percent(group.completedFiles, group.totalFiles)}%
+                        </Text>
+                      </Flex>
+                      {group.folderTotal > 0 ? (
+                        <Text as="div" size="1" color="gray" mt="1">
+                          目录 {group.folderDone}/{group.folderTotal}
+                        </Text>
+                      ) : null}
+                    </Table.Cell>
+                    <Table.Cell>
+                      <Text size="2">{formatBytes(group.downloadedBytes)}</Text>
+                      <Text as="div" size="1" color="gray">
+                        / {formatBytes(group.totalBytes)}
+                      </Text>
+                    </Table.Cell>
+                    <Table.Cell>
                       <Text size="1" color="gray">
-                        {percent(job.completed_files, job.total_files)}%
+                        {latest.created_at
+                          ? new Date(latest.created_at).toLocaleString("zh-CN", {
+                              hour12: false,
+                            })
+                          : "—"}
                       </Text>
-                    </Flex>
-                    {job.folder_total > 0 ? (
-                      <Text as="div" size="1" color="gray" mt="1">
-                        目录 {job.folder_done}/{job.folder_total}
-                      </Text>
-                    ) : null}
-                  </Table.Cell>
-                  <Table.Cell>
-                    <Text size="2">{formatBytes(job.downloaded_bytes)}</Text>
-                    <Text as="div" size="1" color="gray">
-                      / {formatBytes(job.total_bytes)}
-                    </Text>
-                  </Table.Cell>
-                  <Table.Cell>
-                    <Text size="1" color="gray">
-                      {job.created_at
-                        ? new Date(job.created_at).toLocaleString("zh-CN", { hour12: false })
-                        : "—"}
-                    </Text>
-                  </Table.Cell>
-                  <Table.Cell>
-                    <div
-                      className="row-actions"
-                      onClick={(event) => event.stopPropagation()}
-                      onKeyDown={(event) => event.stopPropagation()}
-                    >
-                      <ConfirmButton
-                        title="删除下载任务？"
-                        description="会删除任务记录与文件任务；不再被其他任务引用的下载文件也会一并删除，云端待清理项会继续执行。"
-                        confirmLabel="删除"
-                        disabled={
-                          deleteJob.isPending ||
-                          !["COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED", "CANCELLED"].includes(job.status)
-                        }
-                        onConfirm={() => deleteJob.mutate(job.id)}
+                    </Table.Cell>
+                    <Table.Cell>
+                      <div
+                        className="row-actions"
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
                       >
-                        <Trash2 size={14} aria-hidden /> 删除
-                      </ConfirmButton>
-                    </div>
-                  </Table.Cell>
-                </Table.Row>
-              ))}
-              {visibleJobs.length === 0 && !jobsQuery.isLoading ? (
+                        <ConfirmButton
+                          title={
+                            group.jobs.length > 1
+                              ? `删除该分享的 ${group.jobs.length} 个任务？`
+                              : "删除下载任务？"
+                          }
+                          description="会删除任务记录与文件任务；不再被其他任务引用的下载文件也会一并删除，云端待清理项会继续执行。"
+                          confirmLabel="删除"
+                          disabled={deleteJobs.isPending || !allTerminal}
+                          onConfirm={() => deleteGroup(group)}
+                        >
+                          <Trash2 size={14} aria-hidden /> 删除
+                        </ConfirmButton>
+                      </div>
+                    </Table.Cell>
+                  </Table.Row>
+                );
+              })}
+              {visibleGroups.length === 0 && !jobsQuery.isLoading ? (
                 <Table.Row>
                   <Table.Cell colSpan={6}>
                     <Flex align="center" gap="2" py="4" justify="center">

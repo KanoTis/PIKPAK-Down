@@ -687,6 +687,21 @@ export interface components {
             completed_files: number;
             /** Failed Files */
             failed_files: number;
+            /**
+             * Cancelled Files
+             * @default 0
+             */
+            cancelled_files: number;
+            /**
+             * Active Files
+             * @default 0
+             */
+            active_files: number;
+            /**
+             * Queued Files
+             * @default 0
+             */
+            queued_files: number;
             /** Total Bytes */
             total_bytes: number;
             /** Downloaded Bytes */
@@ -701,6 +716,8 @@ export interface components {
             error_message?: string | null;
             /** Created At */
             created_at?: string | null;
+            /** Updated At */
+            updated_at?: string | null;
             /** Started At */
             started_at?: string | null;
             /** Finished At */
@@ -1252,6 +1269,7 @@ export interface operations {
                 cursor?: string | null;
                 limit?: number;
                 state?: string | null;
+                category?: string | null;
                 q?: string | null;
             };
             header?: never;
