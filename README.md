@@ -2,7 +2,7 @@
 
 单容器、单用户的 PikPak 分享下载与血缘溯源 Web 应用。
 
-- **下载**：先解析分享并展示全部文件/文件夹（自动翻页，不再需要“加载更多”），可按名称/类型/大小正反排序，默认按名称升序；勾选需要的内容、选择挂载下载目录中的目标位置后再创建任务；非视频或 `anonymous_play_range=1.00` 的视频走匿名直链；否则从账号池转存、取登录态 `web_content_link` 后**立即删除云盘文件**，再下载并校验 `size + Merkle-gcid`。最终文件按分享文件夹结构写入 `/downloads/<目标子目录>/<相对路径>`，临时分片放在独立的 `/cache/<task-id>/`。
+- **下载**：先解析分享并展示全部文件/文件夹（自动翻页，不再需要“加载更多”），可按名称/类型/大小正反排序，默认按名称升序；勾选需要的内容、选择挂载下载目录中的目标位置后再创建任务。同一分享 + 同一目标位置会合并到现有任务，而不是新建；任务按下载/队列/失败/成功四个分类展示。非视频或 `anonymous_play_range=1.00` 的视频走匿名直链；否则从账号池转存、取登录态 `web_content_link` 后**立即删除云盘文件**，再下载并校验 `size + Merkle-gcid`。最终文件按分享文件夹结构写入 `/downloads/<目标子目录>/<相对路径>`，临时分片放在独立的 `/cache/<task-id>/`。
 - **血缘**：全量血缘图从分享起点枚举全部文件，按 `params.original_share_id` / `original_file_id` 逐层去重展开上游分享，聚合文件级证据为分享级边；同时保留单目标直系链、文件夹链、tenant refs、同指纹副本、匿名窗口与终止点。血缘页先解析分享并勾选文件/文件夹，再创建运行；图页面使用 Cytoscape.js 渲染，按深度分层，每个层级一列纵向排列；默认只绘制聚焦线路，悬停节点高亮关联节点（连接过多时不铺线），点击节点打开详情。未展开的分享显示“未展开分享”和来源文件路径，可用“补齐名称”只拉取分享元数据、不展开内容。
 - **账号池**：只导入人工取得的 `refresh_token`；不自动注册、不处理验证码、不保存登录密码。
 
@@ -84,7 +84,7 @@ DOWNLOADS_DIR=/downloads 最终下载目录
 CACHE_DIR=/cache         下载临时目录
 ```
 
-`DOWNLOAD_MAX_CONCURRENCY`、`ARIA2_SPLIT`、`LINEAGE_MAX_*` 等都可省略，代码默认值与 `.env.example` 一致；也可在 `/settings` 页面运行时调整并持久化。
+`DUPLICATE_NAME_POLICY`（`rename` / `overwrite` / `skip`，默认 `rename`）、`DOWNLOAD_MAX_CONCURRENCY`、`ARIA2_SPLIT`、`LINEAGE_MAX_*` 等都可省略，代码默认值与 `.env.example` 一致；也可在 `/settings` 页面运行时调整并持久化。
 
 启动时创建 `DATA_DIR`、`DOWNLOADS_DIR`、`CACHE_DIR` 与证据/状态目录，并执行 Alembic migration。只运行一个 Uvicorn worker，调度器与 aria2 都在同一进程生命周期内管理。
 
@@ -93,7 +93,7 @@ CACHE_DIR=/cache         下载临时目录
 - `POST /api/share-preview`：解析分享并分页浏览目录，供前端勾选
 - `GET /api/download-targets`：列出挂载下载目录下可选的目标子目录
 - `GET /api/settings`、`PATCH /api/settings`：运行时调整下载并发、单任务连接数与血缘预算，持久化到 `app_settings`
-- `POST/GET /api/download-jobs`（创建时 `target_subdir` 选择下载位置）、`GET /api/download-jobs/{id}`、`GET /api/download-jobs/{id}/files`、`POST /api/download-jobs/{id}/cancel`、`DELETE /api/download-jobs/{id}`
+- `POST/GET /api/download-jobs`（创建时 `target_subdir` 选择下载位置；同一分享与目标位置自动合并选择项）、`GET /api/download-jobs/{id}`、`GET /api/download-jobs/{id}/files`、`POST /api/download-jobs/{id}/cancel`、`DELETE /api/download-jobs/{id}`
 - `GET /api/downloads/{id}`、`POST /api/downloads/{id}/pause|resume|retry|cancel`、`GET /api/downloads/{id}/file`
 - `GET/POST /api/accounts`、`POST /api/accounts/{id}/refresh|enable|disable`、`DELETE /api/accounts/{id}`、`GET /api/cleanups`
 - `POST /api/lineage-runs`：`graph: true` 创建血缘图运行；可带 `items` 只展开勾选的文件/文件夹，不传则遍历整个分享
@@ -120,8 +120,9 @@ uv run pytest backend/tests/integration -q
 - 账号队列：任务先于账号创建时保持 `ACCOUNT_QUEUED`；账号加入后调度器会自动重新领取。任务自己持有的租约会直接复用；指向已删除/已结束任务的陈旧租约会自动清理，避免账号页显示“已租用”但任务仍等待。
 - 设置页：`/settings`，调整任务并发（1–16）、单任务连接数（aria2 split / 每服务器连接，1–16）、血缘条目/请求/分享/目录预算；保存后立即生效并跨重启保留。
 - 文件夹大小：PikPak 列表接口对文件夹只返回 0，真实大小需要递归枚举；预览默认显示 `—`，不阻塞列表加载。
+- 同名冲突：目标目录已有同名文件且哈希不同，按设置处理：`rename` 保留两份，`overwrite` 覆盖，`skip` 保留已有文件并在任务上标记 `DUPLICATE_SKIPPED`。
 - 下载结构：最终文件写入 `DOWNLOADS_DIR/<target_subdir>/<分享相对路径>`，文件夹选择保留子树；临时文件在 `CACHE_DIR/<task-id>/download.bin`，成功后原子移动/跨挂载复制，失败或取消时删除。
-- 后端测试：`35 passed`（captcha 向量、Merkle 向量、窗口并集、下载/转存/删除顺序、清理重试、匿名/账号/文件夹下载、预览与勾选下载、嵌套目录选择、断点重启、状态机、错误契约、血缘直系/文件夹/tenant refs/窗口、全量图 BFS 去重与图 API）。
+- 后端测试：`37 passed`（captcha 向量、Merkle 向量、窗口并集、下载/转存/删除顺序、清理重试、匿名/账号/文件夹下载、预览与勾选下载、嵌套目录选择、断点重启、状态机、错误契约、血缘直系/文件夹/tenant refs/窗口、全量图 BFS 去重与图 API）。
 - 删除：下载任务与血缘运行在列表页可删除；运行中的任务需先取消。删除下载任务会移除任务记录，删除不再被其他任务引用的下载文件，云端待清理项继续执行；删除血缘运行会移除节点/边/快照/图数据与证据目录。
 - 全量图 UI：真实分享回归得到 83 个分享节点、48,641 个文件、1,359 个目录；层级为 L0 起点 → L1 直接上游 → L2 二级上游 → L3 三级上游。验证图例筛选、缩放/适应画布、节点详情来源文件、分享内容分页（500 → 1,000）。命中 `LINEAGE_MAX_ITEMS=50000` 时报告 `budget_exhausted`，未展开节点标记为“预算截断”并在详情提示。
 - Docker 端到端：`docker build` 成功；容器以 UID 10001 运行；`/api/health` 200；SSE 事件补发；账号转存后删除时间早于 aria2 首个请求；浏览器保存文件 Merkle 与声明一致；1440×900 与 390×844 页面检查通过。

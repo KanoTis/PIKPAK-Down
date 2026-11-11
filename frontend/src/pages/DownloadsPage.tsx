@@ -51,6 +51,25 @@ interface DownloadTargets {
 
 type SortKey = "name" | "kind" | "size";
 type SortDir = "asc" | "desc";
+type JobCategory = "downloading" | "queued" | "failed" | "success";
+
+const JOB_TABS: { key: JobCategory; label: string }[] = [
+  { key: "downloading", label: "下载" },
+  { key: "queued", label: "队列" },
+  { key: "failed", label: "失败" },
+  { key: "success", label: "成功" },
+];
+
+function categoryForJob(job: DownloadJob): JobCategory {
+  if (job.category === "failed") return "failed";
+  if (job.category === "success") return "success";
+  if (job.category === "queued") return "queued";
+  if (job.category === "downloading") return "downloading";
+  if (job.status === "FAILED" || job.status === "CANCELLED") return "failed";
+  if (job.status === "ENUMERATING") return "queued";
+  if (job.status === "READY") return "downloading";
+  return "success";
+}
 
 function compareItems(a: PreviewItem, b: PreviewItem, key: SortKey): number {
   if (key === "name") {
@@ -115,6 +134,7 @@ export function DownloadsPage() {
   const [targetSubdir, setTargetSubdir] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [jobTab, setJobTab] = useState<JobCategory>("downloading");
 
   const targetsQuery = useQuery({
     queryKey: ["download-targets"],
@@ -339,13 +359,13 @@ export function DownloadsPage() {
   );
 
   const jobs = jobsQuery.data ?? [];
-  const active = jobs.filter(
-    (job) => !["COMPLETED", "COMPLETED_WITH_ERRORS", "FAILED", "CANCELLED"].includes(job.status),
-  );
-  const completed = jobs.filter(
-    (job) => job.status === "COMPLETED" || job.status === "COMPLETED_WITH_ERRORS",
-  );
-  const totalBytes = jobs.reduce((sum, job) => sum + (job.total_bytes ?? 0), 0);
+  const jobGroups = Object.fromEntries(
+    JOB_TABS.map((tab) => [
+      tab.key,
+      jobs.filter((job) => categoryForJob(job) === tab.key),
+    ]),
+  ) as Record<JobCategory, DownloadJob[]>;
+  const visibleJobs = jobGroups[jobTab];
 
   const openJob = (job: DownloadJob) => {
     void navigate({ to: "/downloads/$jobId", params: { jobId: job.id } });
@@ -636,41 +656,35 @@ export function DownloadsPage() {
       )}
 
       <div className="grid-cards" style={{ marginBottom: 20 }}>
-        <Card size="2">
-          <Text size="1" color="gray">
-            任务总数
-          </Text>
-          <Text as="div" size="6" weight="bold">
-            {jobs.length}
-          </Text>
-        </Card>
-        <Card size="2">
-          <Text size="1" color="gray">
-            进行中
-          </Text>
-          <Text as="div" size="6" weight="bold">
-            {active.length}
-          </Text>
-        </Card>
-        <Card size="2">
-          <Text size="1" color="gray">
-            已完成
-          </Text>
-          <Text as="div" size="6" weight="bold">
-            {completed.length}
-          </Text>
-        </Card>
-        <Card size="2">
-          <Text size="1" color="gray">
-            声明总量
-          </Text>
-          <Text as="div" size="6" weight="bold">
-            {formatBytes(totalBytes)}
-          </Text>
-        </Card>
+        {JOB_TABS.map((tab) => (
+          <Card size="2" key={tab.key}>
+            <Text size="1" color="gray">
+              {tab.label}
+            </Text>
+            <Text as="div" size="6" weight="bold">
+              {jobGroups[tab.key].length}
+            </Text>
+          </Card>
+        ))}
       </div>
 
       <ErrorBanner message={jobsQuery.isError ? errorMessage(jobsQuery.error) : null} />
+
+      <div className="job-tabs" role="tablist" aria-label="任务分类">
+        {JOB_TABS.map((tab) => (
+          <button
+            key={tab.key}
+            type="button"
+            role="tab"
+            aria-selected={jobTab === tab.key}
+            className={`job-tab${jobTab === tab.key ? " is-active" : ""}`}
+            onClick={() => setJobTab(tab.key)}
+          >
+            {tab.label}
+            <span>{jobGroups[tab.key].length}</span>
+          </button>
+        ))}
+      </div>
 
       <Card size="2" style={{ padding: 0 }}>
         <div className="table-scroll">
@@ -686,7 +700,7 @@ export function DownloadsPage() {
               </Table.Row>
             </Table.Header>
             <Table.Body>
-              {jobs.map((job) => (
+              {visibleJobs.map((job) => (
                 <Table.Row
                   key={job.id}
                   className="row-link"
@@ -772,12 +786,16 @@ export function DownloadsPage() {
                   </Table.Cell>
                 </Table.Row>
               ))}
-              {jobs.length === 0 && !jobsQuery.isLoading ? (
+              {visibleJobs.length === 0 && !jobsQuery.isLoading ? (
                 <Table.Row>
                   <Table.Cell colSpan={6}>
                     <Flex align="center" gap="2" py="4" justify="center">
                       <Download size={16} aria-hidden />
-                      <Text color="gray">还没有下载任务，解析分享并选择内容开始。</Text>
+                      <Text color="gray">
+                        {jobs.length === 0
+                          ? "还没有下载任务，解析分享并选择内容开始。"
+                          : `当前分类（${JOB_TABS.find((tab) => tab.key === jobTab)?.label}）没有任务。`}
+                      </Text>
                     </Flex>
                   </Table.Cell>
                 </Table.Row>

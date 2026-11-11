@@ -16,6 +16,7 @@ from fake_pikpak_server import (
     BADLINK_SHARE,
     FAIL_SHARE,
     FOLDER_FILE1,
+    FOLDER_FILE2,
     FOLDER_ROOT,
     FOLDER_SHARE,
     NESTED_FILE,
@@ -289,8 +290,6 @@ async def test_restart_reuses_partial_and_finishes(env, fake_server) -> None:
 
 @pytest.mark.asyncio
 async def test_folder_share_enumerates_and_downloads_all_files(env, fake_server) -> None:
-    from app.db import get_session_factory
-
     job_id = await create_job(f"https://mypikpak.com/s/{FOLDER_SHARE}")
     job, tasks = await run_until(job_id, lambda job, tasks: job.status == "COMPLETED")
     assert job.folder_total == 1
@@ -521,3 +520,66 @@ async def test_account_reclaims_own_lease(env, fake_server) -> None:
         timeout=60,
     )
     assert tasks[0].status == "DONE"
+
+
+@pytest.mark.asyncio
+async def test_same_share_merges_into_existing_job(env, fake_server) -> None:
+    from app.db import get_session_factory
+    from app.services.download import create_job as create
+
+    async def create_selection(file_id: str, name: str) -> str:
+        factory = get_session_factory()
+        async with factory() as session:
+            job = await create(
+                session,
+                input_url=f"https://mypikpak.com/s/{FOLDER_SHARE}",
+                pass_code=None,
+                items=[
+                    {
+                        "file_id": file_id,
+                        "kind": "drive#file",
+                        "name": name,
+                        "relative_path": f"folder-root/{name}",
+                    }
+                ],
+            )
+            await session.commit()
+            return job.id
+
+    first_id = await create_selection(FOLDER_FILE1, "anon-copy.bin")
+    await run_until(first_id, lambda job, tasks: job.status == "COMPLETED")
+    second_id = await create_selection(FOLDER_FILE2, "small.bin")
+    assert second_id == first_id
+
+    job, tasks = await run_until(
+        first_id, lambda job, tasks: job.status == "COMPLETED" and len(tasks) == 2
+    )
+    assert {task.target_path for task in tasks} == {
+        "folder-root/anon-copy.bin",
+        "folder-root/small.bin",
+    }
+    assert all(task.status == "DONE" for task in tasks)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_policy_rename_and_skip(env, fake_server) -> None:
+    target = env.downloads_dir / "anon.bin"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"old-different-content")
+
+    settings = env
+    settings.duplicate_name_policy = "rename"
+    job_id = await create_job(f"https://mypikpak.com/s/{ANON_SHARE}")
+    job, tasks = await run_until(job_id, lambda job, tasks: job.status == "COMPLETED")
+    assert tasks[0].target_path == "anon (1).bin"
+    assert target.read_bytes() == b"old-different-content"
+
+    target.unlink()
+    target.write_bytes(b"old-different-content")
+    settings.duplicate_name_policy = "skip"
+    job_id = await create_job(f"https://mypikpak.com/s/{ANON_SHARE}")
+    job, tasks = await run_until(job_id, lambda job, tasks: job.status == "COMPLETED")
+    assert tasks[0].status == "DONE"
+    assert tasks[0].error_code == "DUPLICATE_SKIPPED"
+    assert target.read_bytes() == b"old-different-content"
+    settings.duplicate_name_policy = "rename"

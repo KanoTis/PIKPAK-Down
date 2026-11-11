@@ -2142,6 +2142,11 @@
             "type": "string",
             "title": "Status"
           },
+          "category": {
+            "type": "string",
+            "title": "Category",
+            "default": "downloading"
+          },
           "total_files": {
             "type": "integer",
             "title": "Total Files"
@@ -2935,6 +2940,10 @@
             "type": "integer",
             "title": "Task Connections"
           },
+          "duplicate_name_policy": {
+            "type": "string",
+            "title": "Duplicate Name Policy"
+          },
           "lineage_max_items": {
             "type": "integer",
             "title": "Lineage Max Items"
@@ -2956,6 +2965,7 @@
         "required": [
           "download_max_concurrency",
           "task_connections",
+          "duplicate_name_policy",
           "lineage_max_items",
           "lineage_max_requests",
           "lineage_max_shares",
@@ -2990,6 +3000,17 @@
               }
             ],
             "title": "Task Connections"
+          },
+          "duplicate_name_policy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duplicate Name Policy"
           },
           "lineage_max_items": {
             "anyOf": [

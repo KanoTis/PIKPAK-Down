@@ -6,17 +6,22 @@ import { client, errorMessage, unwrap } from "../api/client";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { PageHeader } from "../components/PageHeader";
 
+type DuplicatePolicy = "rename" | "overwrite" | "skip";
+
 interface RuntimeSettings {
   download_max_concurrency: number;
   task_connections: number;
+  duplicate_name_policy: DuplicatePolicy;
   lineage_max_items: number;
   lineage_max_requests: number;
   lineage_max_shares: number;
   lineage_max_folders: number;
 }
 
+type NumericKey = Exclude<keyof RuntimeSettings, "duplicate_name_policy">;
+
 const FIELDS: {
-  key: keyof RuntimeSettings;
+  key: NumericKey;
   label: string;
   hint: string;
   min: number;
@@ -110,7 +115,7 @@ export function SettingsPage() {
     },
   });
 
-  const update = (key: keyof RuntimeSettings, raw: string) => {
+  const update = (key: NumericKey, raw: string) => {
     setForm((current) => {
       if (!current) return current;
       const value = Number(raw);
@@ -167,6 +172,33 @@ export function SettingsPage() {
               onChange={(value) => update(field.key, value)}
             />
           ))}
+          <label className="settings-field">
+            <Text as="div" size="2" weight="medium">
+              同名但 MD5 不同
+            </Text>
+            <select
+              className="settings-select"
+              value={form.duplicate_name_policy}
+              onChange={(event) => {
+                setForm((current) =>
+                  current
+                    ? {
+                        ...current,
+                        duplicate_name_policy: event.target.value as DuplicatePolicy,
+                      }
+                    : current,
+                );
+                setSaved(false);
+              }}
+            >
+              <option value="rename">重命名，保留两份（默认）</option>
+              <option value="overwrite">覆盖已有文件</option>
+              <option value="skip">跳过，保留已有文件</option>
+            </select>
+            <Text as="div" size="1" color="gray" mt="1">
+              目标目录已有同名文件且内容哈希不同时的处理方式。
+            </Text>
+          </label>
         </Card>
 
         <Card size="2">

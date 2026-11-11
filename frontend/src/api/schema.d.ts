@@ -676,6 +676,11 @@ export interface components {
             target_subdir: string;
             /** Status */
             status: string;
+            /**
+             * Category
+             * @default downloading
+             */
+            category: string;
             /** Total Files */
             total_files: number;
             /** Completed Files */
@@ -903,6 +908,8 @@ export interface components {
             download_max_concurrency: number;
             /** Task Connections */
             task_connections: number;
+            /** Duplicate Name Policy */
+            duplicate_name_policy: string;
             /** Lineage Max Items */
             lineage_max_items: number;
             /** Lineage Max Requests */
@@ -918,6 +925,8 @@ export interface components {
             download_max_concurrency?: number | null;
             /** Task Connections */
             task_connections?: number | null;
+            /** Duplicate Name Policy */
+            duplicate_name_policy?: string | null;
             /** Lineage Max Items */
             lineage_max_items?: number | null;
             /** Lineage Max Requests */

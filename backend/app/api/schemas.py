@@ -60,6 +60,7 @@ class DownloadJobOut(BaseModel):
     root_name: str | None = None
     target_subdir: str = ""
     status: str
+    category: str = "downloading"
     total_files: int
     completed_files: int
     failed_files: int
@@ -200,6 +201,7 @@ class ErrorBody(BaseModel):
 class RuntimeSettingsOut(BaseModel):
     download_max_concurrency: int
     task_connections: int
+    duplicate_name_policy: str
     lineage_max_items: int
     lineage_max_requests: int
     lineage_max_shares: int
@@ -209,6 +211,7 @@ class RuntimeSettingsOut(BaseModel):
 class RuntimeSettingsUpdate(BaseModel):
     download_max_concurrency: int | None = Field(None, ge=1, le=16)
     task_connections: int | None = Field(None, ge=1, le=16)
+    duplicate_name_policy: str | None = None
     lineage_max_items: int | None = Field(None, ge=1000, le=1_000_000)
     lineage_max_requests: int | None = Field(None, ge=100, le=100_000)
     lineage_max_shares: int | None = Field(None, ge=10, le=10_000)

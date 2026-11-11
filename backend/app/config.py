@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     aria2_min_split_size: str = "8M"
     aria2_rpc_port: int = 6800
     download_max_rate: int = 0
+    duplicate_name_policy: str = "rename"
 
     anon_api_qps: float = 5.0
     share_probe_qps: float = 2.0

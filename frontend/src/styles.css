@@ -1150,3 +1150,58 @@ body {
 .sort-header.is-active svg {
   opacity: 1;
 }
+
+.settings-select {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--gray-a7);
+  border-radius: 6px;
+  background: var(--color-panel-solid);
+  color: var(--gray-12);
+  font: inherit;
+}
+
+.job-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: 10px;
+  padding: 3px;
+  width: fit-content;
+  border: 1px solid var(--gray-a5);
+  border-radius: 9px;
+  background: var(--gray-2);
+}
+
+.job-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--gray-10);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.job-tab span {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--gray-a4);
+  color: var(--gray-11);
+  font-size: 10px;
+  text-align: center;
+}
+
+.job-tab:hover {
+  color: var(--gray-12);
+}
+
+.job-tab.is-active {
+  background: var(--color-panel-solid);
+  color: var(--gray-12);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.1);
+}

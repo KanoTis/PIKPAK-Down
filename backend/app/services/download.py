@@ -161,12 +161,90 @@ async def create_job(
         )
     if len(selection) > 1000:
         raise ValueError("一次最多选择 1000 项")
+    normalized_target = _safe_subdir(target_subdir)
+    existing: DownloadJob | None = None
+    if selection:
+        existing = (
+            await session.execute(
+                select(DownloadJob)
+                .where(
+                    DownloadJob.share_id == parsed.share_id,
+                    DownloadJob.target_subdir == normalized_target,
+                    DownloadJob.status != JobStatus.CANCELLED,
+                )
+                .order_by(DownloadJob.updated_at.desc(), DownloadJob.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+    if existing is not None:
+        job = existing
+        job.input_url = input_display
+        if parsed.pass_code:
+            job.pass_code_enc = encrypt(parsed.pass_code)
+        existing_ids = set(
+            (
+                await session.execute(
+                    select(DownloadJobItem.share_file_id).where(
+                        DownloadJobItem.job_id == job.id
+                    )
+                )
+            ).scalars().all()
+        )
+        next_index = int(
+            (
+                await session.execute(
+                    select(func.max(DownloadJobItem.sort_index)).where(
+                        DownloadJobItem.job_id == job.id
+                    )
+                )
+            ).scalar_one()
+            or -1
+        ) + 1
+        added = 0
+        for item in selection:
+            if item["file_id"] in existing_ids:
+                continue
+            session.add(
+                DownloadJobItem(
+                    job_id=job.id,
+                    share_file_id=item["file_id"],
+                    kind=item["kind"],
+                    name=item["name"],
+                    relative_path=item["relative_path"],
+                    sort_index=next_index,
+                )
+            )
+            existing_ids.add(item["file_id"])
+            next_index += 1
+            added += 1
+        if not added:
+            return job
+        job.root_kind = "selection"
+        job.root_file_id = job.root_file_id or selection[0]["file_id"]
+        total_items = len(existing_ids)
+        job.root_name = f"已选择 {total_items} 项"
+        if job.status in JobStatus.TERMINAL or job.status == JobStatus.READY:
+            job.status = JobStatus.ENUMERATING
+            job.finished_at = None
+            job.error_code = None
+            job.error_message = None
+        await session.flush()
+        events.emit(
+            session,
+            "download_job",
+            job.id,
+            "download_job.merged",
+            {"share_id": job.share_id, "added": added, "selected": total_items},
+        )
+        return job
+
     job = DownloadJob(
         input_url=input_display,
         share_id=parsed.share_id,
         pass_code_enc=encrypt(parsed.pass_code),
         status=JobStatus.ENUMERATING,
-        target_subdir=_safe_subdir(target_subdir),
+        target_subdir=normalized_target,
     )
     if selection:
         job.root_kind = "selection"
@@ -1584,7 +1662,36 @@ async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTa
             if reusable:
                 temp.unlink(missing_ok=True)
             else:
-                target = _unique_target(target)
+                policy = settings.duplicate_name_policy
+                if policy == "overwrite":
+                    target.unlink(missing_ok=True)
+                elif policy == "skip":
+                    temp.unlink(missing_ok=True)
+                    control = Path(str(temp) + ".aria2")
+                    control.unlink(missing_ok=True)
+                    shutil.rmtree(settings.cache_dir / task.id, ignore_errors=True)
+                    task.target_path = _download_relative(target)
+                    task.object_id = None
+                    task.bytes_done = 0
+                    task.verified_chunk = result.chunk
+                    task.speed = 0
+                    task.source_url_enc = None
+                    task.error_code = "DUPLICATE_SKIPPED"
+                    task.error_message = "同名文件已存在且内容不同，按设置跳过"
+                    _set_status(task, TaskStatus.DONE)
+                    task.finished_at = utcnow()
+                    events.emit(
+                        session,
+                        "download_task",
+                        task.id,
+                        "download_task.duplicate_skipped",
+                        {"target_path": task.target_path},
+                    )
+                    await _refresh_job(session, job)
+                    await session.commit()
+                    return
+                else:
+                    target = _unique_target(target)
         if target.exists():
             temp.unlink(missing_ok=True)
         else:

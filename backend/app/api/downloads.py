@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
@@ -42,7 +42,35 @@ def iso(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
-def job_out(job: DownloadJob) -> DownloadJobOut:
+ACTIVE_STATES = {
+    TaskStatus.ANON_DOWNLOADING,
+    TaskStatus.ACCOUNT_DOWNLOADING,
+    TaskStatus.VERIFYING,
+}
+QUEUED_STATES = {
+    TaskStatus.DISCOVERED,
+    TaskStatus.PLANNING,
+    TaskStatus.ACCOUNT_QUEUED,
+    TaskStatus.RESTORING,
+    TaskStatus.WCL_READY,
+}
+
+
+def job_category(job: DownloadJob, task_states: list[str]) -> str:
+    if job.status in ("FAILED", "CANCELLED"):
+        return "failed"
+    if job.status in ("COMPLETED", "COMPLETED_WITH_ERRORS"):
+        return "success"
+    if any(state in ACTIVE_STATES for state in task_states):
+        return "downloading"
+    if any(state in QUEUED_STATES for state in task_states):
+        return "queued"
+    if job.status == "ENUMERATING":
+        return "queued"
+    return "downloading"
+
+
+def job_out(job: DownloadJob, category: str | None = None) -> DownloadJobOut:
     return DownloadJobOut(
         id=job.id,
         input_url=job.input_url,
@@ -52,6 +80,7 @@ def job_out(job: DownloadJob) -> DownloadJobOut:
         root_name=job.root_name,
         target_subdir=job.target_subdir,
         status=job.status,
+        category=category or job_category(job, []),
         total_files=job.total_files,
         completed_files=job.completed_files,
         failed_files=job.failed_files,
@@ -205,7 +234,18 @@ async def list_download_jobs(
             .limit(limit)
         )
     ).scalars().all()
-    return [job_out(job) for job in rows]
+    job_ids = [job.id for job in rows]
+    status_rows = (
+        await session.execute(
+            select(DownloadTask.job_id, DownloadTask.status, func.count(DownloadTask.id))
+            .where(DownloadTask.job_id.in_(job_ids))
+            .group_by(DownloadTask.job_id, DownloadTask.status)
+        )
+    ).all()
+    states: dict[str, list[str]] = {}
+    for job_id, state, count in status_rows:
+        states.setdefault(job_id, []).extend([state] * int(count))
+    return [job_out(job, job_category(job, states.get(job.id, []))) for job in rows]
 
 
 @router.get("/download-jobs/{job_id}", response_model=DownloadJobOut)
@@ -215,7 +255,12 @@ async def get_download_job(
     job = await session.get(DownloadJob, job_id)
     if job is None:
         raise _error(404, "JOB_NOT_FOUND", "下载任务不存在")
-    return job_out(job)
+    task_states = (
+        await session.execute(
+            select(DownloadTask.status).where(DownloadTask.job_id == job.id)
+        )
+    ).scalars().all()
+    return job_out(job, job_category(job, list(task_states)))
 
 
 def _parse_cursor(cursor: str | None) -> tuple[int, str] | None:

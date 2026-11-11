@@ -24,11 +24,14 @@ ACTUAL_KEYS: dict[str, tuple[int, int]] = {
 API_KEYS = (
     "download_max_concurrency",
     "task_connections",
+    "duplicate_name_policy",
     "lineage_max_items",
     "lineage_max_requests",
     "lineage_max_shares",
     "lineage_max_folders",
 )
+
+DUPLICATE_POLICIES = ("rename", "overwrite", "skip")
 
 
 class SettingsValidation(Exception):
@@ -42,11 +45,12 @@ def _check(key: str, value: int) -> int:
     return int(value)
 
 
-def snapshot() -> dict[str, int]:
+def snapshot() -> dict[str, Any]:
     settings = get_settings()
     return {
         "download_max_concurrency": settings.download_max_concurrency,
         "task_connections": settings.aria2_split,
+        "duplicate_name_policy": settings.duplicate_name_policy,
         "lineage_max_items": settings.lineage_max_items,
         "lineage_max_requests": settings.lineage_max_requests,
         "lineage_max_shares": settings.lineage_max_shares,
@@ -58,6 +62,12 @@ async def load_overrides(session: AsyncSession) -> None:
     rows = (await session.execute(select(AppSetting))).scalars().all()
     settings = get_settings()
     for row in rows:
+        if row.key == "duplicate_name_policy":
+            if row.value not in DUPLICATE_POLICIES:
+                log.warning("runtime_setting_invalid", key=row.key, value=row.value)
+                continue
+            settings.duplicate_name_policy = row.value
+            continue
         if row.key not in ACTUAL_KEYS:
             continue
         try:
@@ -70,9 +80,9 @@ async def load_overrides(session: AsyncSession) -> None:
         log.info("runtime_settings_loaded", count=len(rows))
 
 
-async def update_overrides(session: AsyncSession, payload: dict[str, Any]) -> dict[str, int]:
+async def update_overrides(session: AsyncSession, payload: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
-    actual: dict[str, int] = {}
+    actual: dict[str, Any] = {}
     for key in API_KEYS:
         value = payload.get(key)
         if value is None:
@@ -81,6 +91,10 @@ async def update_overrides(session: AsyncSession, payload: dict[str, Any]) -> di
             checked = _check("aria2_split", int(value))
             actual["aria2_split"] = checked
             actual["aria2_max_connection_per_server"] = checked
+        elif key == "duplicate_name_policy":
+            if value not in DUPLICATE_POLICIES:
+                raise SettingsValidation("duplicate_name_policy 取值非法")
+            actual[key] = value
         else:
             actual[key] = _check(key, int(value))
     if not actual:
