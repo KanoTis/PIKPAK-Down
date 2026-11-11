@@ -219,7 +219,13 @@ async def recover_stale_leases(session: AsyncSession) -> None:
         if (
             task is None
             or task.status in TaskStatus.TERMINAL
-            or task.status == TaskStatus.PAUSED
+            or task.status
+            in (
+                TaskStatus.PAUSED,
+                TaskStatus.ACCOUNT_QUEUED,
+                TaskStatus.WCL_READY,
+                TaskStatus.VERIFYING,
+            )
         ):
             stale.append((account_id, task_id))
     for account_id, task_id in stale:

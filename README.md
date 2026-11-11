@@ -142,7 +142,7 @@ uv run pytest backend/tests/integration -q
 - tar 单连接：tar 不支持多连接下载，tar 路线始终以 `single_connection=True` 启动 aria2，不做 multipart/Range 探测。账号普通文件签发遇到 `daily_download_size_exceeded` 时，自动走 tar 归档通道：restore 副本 → 根目录专用打包目录（`parent_id=""`，`*` 只用于列表）→ `files/pack` → 轮询 pack 任务 → 签发 tar 直链（配额检查豁免）→ 单连接下载 tar → **解包前先按 `rename`/`overwrite`/`skip` 处理目标重名** → 在 `/downloads` 目标目录内解出隐藏临时文件 `.<task-id>.part` → 按原始 `size + Merkle-gcid` 校验 → 同目录 `os.replace` 原子改名为最终文件。不再写入 cache 的 `extracted.bin`。tar 下载在任务详情中显示为 `tar 通道`。
 - 失败重试：下载页「失败」分类提供「一键重试全部失败」，任务子页提供「一键重试失败文件」；只重置失败/取消的文件，不重新下载已完成文件。
 - 下载结构：最终文件写入 `DOWNLOADS_DIR/<target_subdir>/<分享相对路径>`，文件夹选择保留子树；临时文件在 `CACHE_DIR/<task-id>/download.bin`，成功后原子移动/跨挂载复制，失败或取消时删除。
-- 后端测试：`48 passed`（captcha 向量、Merkle 向量、窗口并集、下载/转存/删除顺序、清理重试、匿名/账号/文件夹下载、预览与勾选下载、嵌套目录选择、断点重启、状态机、错误契约、血缘直系/文件夹/tenant refs/窗口、全量图 BFS 去重与图 API）。
+- 后端测试：`50 passed`（captcha 向量、Merkle 向量、窗口并集、下载/转存/删除顺序、清理重试、匿名/账号/文件夹下载、预览与勾选下载、嵌套目录选择、断点重启、状态机、错误契约、血缘直系/文件夹/tenant refs/窗口、全量图 BFS 去重与图 API）。
 - 删除：下载任务与血缘运行在列表页可删除；运行中的任务需先取消。删除下载任务会移除任务记录，删除不再被其他任务引用的下载文件，云端待清理项继续执行；删除血缘运行会移除节点/边/快照/图数据与证据目录。
 - 全量图 UI：集成回归覆盖 L0 起点 → L1 直接上游 → L2 二级上游，验证图例筛选、缩放/适应画布、节点详情来源文件与分享内容。旧基线（83 个分享、48,641 个文件）来自“上游分享全量展开”，改为只解析目标文件后不再适用，需要按新语义重跑真实分享基线。命中 `LINEAGE_MAX_ITEMS=50000` 时报告 `budget_exhausted`，未展开节点标记为“预算截断”并在详情提示。
 - Docker 端到端：`docker build` 成功；容器以 UID 10001 运行；`/api/health` 200；SSE 事件补发；账号转存后删除时间早于 aria2 首个请求；浏览器保存文件 Merkle 与声明一致；1440×900 与 390×844 页面检查通过。

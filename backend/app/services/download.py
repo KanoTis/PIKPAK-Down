@@ -733,19 +733,22 @@ async def dispatch_downloads(session: AsyncSession) -> None:
 
 
 async def _dispatch_enumeration(session: AsyncSession) -> None:
-    jobs = (
+    job_ids = (
         await session.execute(
-            select(DownloadJob)
+            select(DownloadJob.id)
             .where(DownloadJob.status == JobStatus.ENUMERATING)
             .order_by(DownloadJob.created_at.asc())
             .limit(5)
         )
     ).scalars().all()
-    if not jobs:
+    if not job_ids:
         return
     client = AnonymousPikPakClient()
     try:
-        for job in jobs:
+        for job_id in job_ids:
+            job = await session.get(DownloadJob, job_id)
+            if job is None:
+                continue
             selected = int(
                 (
                     await session.execute(
@@ -776,13 +779,15 @@ async def _dispatch_enumeration(session: AsyncSession) -> None:
                     continue
                 except PikPakError as exc:
                     await session.rollback()
-                    job = await session.get(DownloadJob, job.id)
+                    job = await session.get(DownloadJob, job_id)
                     if job is not None:
                         job.status = JobStatus.FAILED
                         job.error_code = exc.code or "ENUMERATION_FAILED"
                         job.error_message = str(exc)
                         job.finished_at = utcnow()
                 await session.commit()
+                if job is None:
+                    continue
             else:
                 if job.root_file_id is None or job.root_kind == "drive#file":
                     try:
@@ -811,13 +816,15 @@ async def _dispatch_enumeration(session: AsyncSession) -> None:
                         continue
                     except PikPakError as exc:
                         await session.rollback()
-                        job = await session.get(DownloadJob, job.id)
+                        job = await session.get(DownloadJob, job_id)
                         if job is not None and exc.code in ("NOT_FOUND", "PERMISSION_DENIED"):
                             job.status = JobStatus.FAILED
                             job.error_code = exc.code
                             job.error_message = str(exc)
                             job.finished_at = utcnow()
                     await session.commit()
+                    if job is None:
+                        continue
             await _refresh_job(session, job)
             await session.commit()
     finally:
@@ -1283,9 +1290,11 @@ async def _start_aria2(
 
 
 async def _dispatch_handoffs(session: AsyncSession) -> None:
-    tasks = (
+    # Only carry ids across the loop: rollback expires ORM instances and a later
+    # lazy attribute access would raise MissingGreenlet in async context.
+    task_ids = (
         await session.execute(
-            select(DownloadTask)
+            select(DownloadTask.id)
             .join(DownloadJob, DownloadTask.job_id == DownloadJob.id)
             .where(
                 DownloadTask.status.in_(
@@ -1297,13 +1306,13 @@ async def _dispatch_handoffs(session: AsyncSession) -> None:
             .limit(3)
         )
     ).scalars().all()
-    for task in tasks:
+    for task_id in task_ids:
         try:
-            await run_account_handoff(session, task.id)
+            await run_account_handoff(session, task_id)
         except RateLimited:
             await session.rollback()
         except Exception:  # noqa: BLE001
-            log.exception("account_handoff_failed", task_id=task.id)
+            log.exception("account_handoff_failed", task_id=task_id)
             await session.rollback()
 
 
@@ -2353,6 +2362,9 @@ async def pause_task(session: AsyncSession, task_id: str) -> DownloadTask:
         TaskStatus.DISCOVERED,
         TaskStatus.PLANNING,
         TaskStatus.ACCOUNT_QUEUED,
+        TaskStatus.RESTORING,
+        TaskStatus.WCL_READY,
+        TaskStatus.VERIFYING,
         TaskStatus.ANON_DOWNLOADING,
         TaskStatus.ACCOUNT_DOWNLOADING,
     ):
@@ -2411,6 +2423,8 @@ async def cancel_task(session: AsyncSession, task_id: str) -> DownloadTask:
                 await client.close()
     if task.account_id:
         await release_account(session, task.account_id, task.id)
+    if task.tar_folder_id:
+        await _delete_tar_folder(session, task)
     shutil.rmtree(get_settings().cache_dir / task.id, ignore_errors=True)
     _set_status(task, TaskStatus.CANCELLED)
     task.finished_at = utcnow()
@@ -2520,6 +2534,10 @@ async def delete_job(session: AsyncSession, job_id: str) -> str:
     object_ids = sorted({task.object_id for task in tasks if task.object_id})
     target_paths = sorted({task.target_path for task in tasks if task.target_path})
     settings = get_settings()
+
+    for task in tasks:
+        if task.tar_folder_id:
+            await _delete_tar_folder(session, task)
 
     for task in tasks:
         relative = task.target_path or _join_relative(

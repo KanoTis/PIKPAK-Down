@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import httpx
 import pytest
-
 from fake_pikpak_server import ACCOUNT_SHARE
 
 
@@ -45,16 +44,13 @@ async def test_pause_resume_cancel_retry_state_machine(env, fake_server) -> None
     task_id = task.id
 
     async with factory() as session:
-        from app.services.download import StateConflict
         task = await session.get(DownloadTask, task_id)
         task.status = "RESTORING"
         await session.commit()
-        try:
-            await pause_task(session, task_id)
-        except StateConflict:
-            pass
-        else:
-            raise AssertionError("RESTORING must not be pausable")
+        paused = await pause_task(session, task_id)
+        assert paused.status == "PAUSED"
+        resumed = await resume_task(session, task_id)
+        assert resumed.status == "ACCOUNT_QUEUED"
         task.status = "ACCOUNT_QUEUED"
         await session.commit()
         paused = await pause_task(session, task_id)
@@ -72,6 +68,64 @@ async def test_pause_resume_cancel_retry_state_machine(env, fake_server) -> None
         assert job.status == "READY"
         job = await cancel_job(session, job_id)
         assert job.status == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_pause_retries_when_database_is_locked(env, fake_server) -> None:
+    import sqlite3
+
+    from app.db import get_session_factory
+    from app.main import app
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+    from sqlalchemy.exc import OperationalError
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/PAUSELOCK0000001",
+            share_id="PAUSELOCK0000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        task = DownloadTask(
+            job_id=job.id,
+            share_file_id="PAUSELOCKFILE0001",
+            name="paused.bin",
+            relative_path="paused.bin",
+            size=1,
+            expected_hash="HASH",
+            status=TaskStatus.ACCOUNT_QUEUED,
+        )
+        session.add(task)
+        await session.commit()
+        task_id = task.id
+
+    original = download.pause_task
+    calls = 0
+
+    async def flaky_pause(session, target_id):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise OperationalError(
+                "UPDATE download_tasks",
+                {},
+                sqlite3.OperationalError("database is locked"),
+            )
+        return await original(session, target_id)
+
+    download.pause_task = flaky_pause
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(f"/api/downloads/{task_id}/pause")
+        assert response.status_code == 200
+        assert response.json()["status"] == TaskStatus.PAUSED
+        assert calls == 3
+    finally:
+        download.pause_task = original
 
 
 @pytest.mark.asyncio

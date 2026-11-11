@@ -931,6 +931,53 @@ async def test_retry_job_requeues_failed_tasks(env, fake_server) -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_handoffs_survives_rollback_between_tasks(env) -> None:
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/DISPATCH0000001",
+            share_id="DISPATCH0000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        tasks = [
+            DownloadTask(
+                job_id=job.id,
+                share_file_id=f"DISPATCHFILE{index}",
+                name=f"dispatch-{index}.bin",
+                relative_path=f"dispatch-{index}.bin",
+                size=1,
+                expected_hash="HASH",
+                status=TaskStatus.ACCOUNT_QUEUED,
+                sort_index=index,
+            )
+            for index in range(2)
+        ]
+        session.add_all(tasks)
+        await session.commit()
+        expected = {task.id for task in tasks}
+        calls: list[str] = []
+
+        async def fake_handoff(session, task_id):
+            calls.append(task_id)
+            raise RuntimeError("boom")
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(download, "run_account_handoff", fake_handoff)
+        try:
+            await download._dispatch_handoffs(session)
+        finally:
+            monkeypatch.undo()
+
+    assert set(calls) == expected
+
+
+@pytest.mark.asyncio
 async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
     from app.db import get_session_factory
     from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus

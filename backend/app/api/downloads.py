@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
@@ -386,22 +388,34 @@ async def get_download(task_id: str, session: AsyncSession = Depends(get_session
 
 
 async def _task_action(session: AsyncSession, task_id: str, action: str) -> DownloadTaskOut:
-    try:
-        if action == "pause":
-            task = await service.pause_task(session, task_id)
-        elif action == "resume":
-            task = await service.resume_task(session, task_id)
-        elif action == "retry":
-            task = await service.retry_task(session, task_id)
-        elif action == "cancel":
-            task = await service.cancel_task(session, task_id)
-        else:
-            raise _error(400, "INVALID_ACTION", "未知操作")
-    except service.DownloadNotFound as exc:
-        raise _error(404, "TASK_NOT_FOUND", str(exc)) from exc
-    except service.StateConflict as exc:
-        raise _error(409, "STATE_CONFLICT", str(exc)) from exc
-    return task_out(task)
+    for attempt in range(3):
+        try:
+            if action == "pause":
+                task = await service.pause_task(session, task_id)
+            elif action == "resume":
+                task = await service.resume_task(session, task_id)
+            elif action == "retry":
+                task = await service.retry_task(session, task_id)
+            elif action == "cancel":
+                task = await service.cancel_task(session, task_id)
+            else:
+                raise _error(400, "INVALID_ACTION", "未知操作")
+            return task_out(task)
+        except service.DownloadNotFound as exc:
+            raise _error(404, "TASK_NOT_FOUND", str(exc)) from exc
+        except service.StateConflict as exc:
+            raise _error(409, "STATE_CONFLICT", str(exc)) from exc
+        except OperationalError as exc:
+            await session.rollback()
+            if "locked" not in str(exc).lower() or attempt == 2:
+                raise _error(
+                    503,
+                    "DATABASE_BUSY",
+                    "数据库繁忙，请稍后重试",
+                    retryable=True,
+                ) from exc
+            await asyncio.sleep(0.4 * (attempt + 1))
+    raise _error(503, "DATABASE_BUSY", "数据库繁忙，请稍后重试", retryable=True)
 
 
 @router.post("/downloads/{task_id}/pause", response_model=DownloadTaskOut)
