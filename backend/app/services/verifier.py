@@ -49,3 +49,42 @@ def verify_file(path: str | Path, size: int, expected_hash: str) -> VerifyResult
         if digest == expected:
             return VerifyResult(True, chunk, roots)
     return VerifyResult(False, None, roots)
+
+
+def extract_tar_member(
+    archive: str | Path,
+    output: str | Path,
+    *,
+    expected_size: int,
+    expected_name: str | None = None,
+) -> bool:
+    """Extract the first regular tar member matching size/name."""
+    import shutil
+    import tarfile
+
+    try:
+        with tarfile.open(archive, mode="r:") as tar:
+            candidates = [
+                member
+                for member in tar.getmembers()
+                if member.isfile() and member.size == expected_size
+            ]
+            if not candidates:
+                return False
+            member = candidates[0]
+            if expected_name and len(candidates) > 1:
+                named = [
+                    item
+                    for item in candidates
+                    if item.name.rsplit("/", 1)[-1] == expected_name
+                ]
+                if named:
+                    member = named[0]
+            source = tar.extractfile(member)
+            if source is None:
+                return False
+            with open(output, "wb") as target:
+                shutil.copyfileobj(source, target, length=1 << 20)
+        return Path(output).stat().st_size == expected_size
+    except (tarfile.TarError, OSError):
+        return False

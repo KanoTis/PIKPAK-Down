@@ -20,6 +20,7 @@ import {
   File,
   Folder,
   Plus,
+  RotateCcw,
   Trash2,
   X,
 } from "lucide-react";
@@ -205,6 +206,23 @@ export function DownloadsPage() {
     queryFn: async () =>
       unwrap(await client.GET("/api/download-jobs", { params: { query: { limit: 100 } } })),
     refetchInterval: 5000,
+  });
+
+  const retryJobs = useMutation({
+    mutationFn: async (jobIds: string[]) => {
+      for (const jobId of jobIds) {
+        await unwrap(
+          await client.POST("/api/download-jobs/{job_id}/retry", {
+            params: { path: { job_id: jobId } },
+          }),
+        );
+      }
+    },
+    onSuccess: () => {
+      setFormError(null);
+      void queryClient.invalidateQueries({ queryKey: ["download-jobs"] });
+    },
+    onError: (error) => setFormError(errorMessage(error)),
   });
 
   const deleteJobs = useMutation({
@@ -734,21 +752,39 @@ export function DownloadsPage() {
 
       <ErrorBanner message={jobsQuery.isError ? errorMessage(jobsQuery.error) : null} />
 
-      <div className="job-tabs" role="tablist" aria-label="任务分类">
-        {JOB_TABS.map((tab) => (
-          <button
-            key={tab.key}
-            type="button"
-            role="tab"
-            aria-selected={jobTab === tab.key}
-            className={`job-tab${jobTab === tab.key ? " is-active" : ""}`}
-            onClick={() => setJobTab(tab.key)}
+      <Flex align="center" gap="3" wrap="wrap" mb="2">
+        <div className="job-tabs" role="tablist" aria-label="任务分类">
+          {JOB_TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              role="tab"
+              aria-selected={jobTab === tab.key}
+              className={`job-tab${jobTab === tab.key ? " is-active" : ""}`}
+              onClick={() => setJobTab(tab.key)}
+            >
+              {tab.label}
+              <span>{jobGroups[tab.key].length}</span>
+            </button>
+          ))}
+        </div>
+        {jobTab === "failed" && visibleGroups.length > 0 ? (
+          <Button
+            size="2"
+            variant="soft"
+            color="blue"
+            disabled={retryJobs.isPending}
+            onClick={() =>
+              retryJobs.mutate(
+                visibleGroups.flatMap((group) => group.jobs.map((job) => job.id)),
+              )
+            }
           >
-            {tab.label}
-            <span>{jobGroups[tab.key].length}</span>
-          </button>
-        ))}
-      </div>
+            <RotateCcw size={14} aria-hidden />
+            {retryJobs.isPending ? "重试中" : "一键重试全部失败"}
+          </Button>
+        ) : null}
+      </Flex>
 
       <Card size="2" style={{ padding: 0 }}>
         <div className="table-scroll">
@@ -856,6 +892,19 @@ export function DownloadsPage() {
                         onClick={(event) => event.stopPropagation()}
                         onKeyDown={(event) => event.stopPropagation()}
                       >
+                        {jobTab === "failed" ? (
+                          <Button
+                            size="1"
+                            variant="soft"
+                            color="blue"
+                            disabled={retryJobs.isPending}
+                            onClick={() =>
+                              retryJobs.mutate(group.jobs.map((job) => job.id))
+                            }
+                          >
+                            <RotateCcw size={13} aria-hidden /> 重试
+                          </Button>
+                        ) : null}
                         <ConfirmButton
                           title={
                             group.jobs.length > 1

@@ -108,6 +108,22 @@ export function DownloadJobPage() {
     onError: (error) => setActionError(errorMessage(error)),
   });
 
+  const retryJob = useMutation({
+    mutationFn: async () =>
+      unwrap(
+        await client.POST("/api/download-jobs/{job_id}/retry", {
+          params: { path: { job_id: jobId } },
+        }),
+      ),
+    onSuccess: () => {
+      setActionError(null);
+      void queryClient.invalidateQueries({ queryKey: ["download-job", jobId] });
+      void queryClient.invalidateQueries({ queryKey: ["job-files", jobId] });
+      void queryClient.invalidateQueries({ queryKey: ["download-jobs"] });
+    },
+    onError: (error) => setActionError(errorMessage(error)),
+  });
+
   const job = jobQuery.data;
   const tasks = filesQuery.data?.pages.flatMap((page) => page.items) ?? [];
   const initializedCategory = useRef(false);
@@ -152,6 +168,17 @@ export function DownloadJobPage() {
                 返回
               </a>
             </Button>
+            {(job.failed_files > 0 || job.status === "FAILED" || job.status === "COMPLETED_WITH_ERRORS") ? (
+              <Button
+                variant="soft"
+                color="blue"
+                onClick={() => retryJob.mutate()}
+                disabled={retryJob.isPending}
+              >
+                <RotateCcw size={14} aria-hidden />
+                {retryJob.isPending ? "重试中" : "一键重试失败文件"}
+              </Button>
+            ) : null}
             {!terminal ? (
               <ConfirmButton
                 label="取消任务"
@@ -344,8 +371,19 @@ function TaskRows({
           </Text>
         </Table.Cell>
         <Table.Cell>
-          <Badge variant="soft" color={task.route === "account" ? "orange" : task.route === "anonymous" ? "blue" : "gray"}>
-            {task.route ?? "未规划"}
+          <Badge
+            variant="soft"
+            color={
+              task.route === "tar"
+                ? "violet"
+                : task.route === "account"
+                  ? "orange"
+                  : task.route === "anonymous"
+                    ? "blue"
+                    : "gray"
+            }
+          >
+            {task.route === "tar" ? "tar 通道" : task.route ?? "未规划"}
           </Badge>
           {task.account_label ? (
             <Text as="div" size="1" color="gray" mt="1">

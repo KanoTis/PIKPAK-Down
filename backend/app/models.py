@@ -188,6 +188,8 @@ class DownloadTask(Base):
     restore_task_id: Mapped[str | None] = mapped_column(String(64))
     restore_folder_id: Mapped[str | None] = mapped_column(String(64))
     restore_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tar_size: Mapped[int] = mapped_column(BigInteger, default=0)
+    tar_folder_id: Mapped[str | None] = mapped_column(String(64))
     remote_deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     aria2_gid: Mapped[str | None] = mapped_column(String(64))
     bytes_done: Mapped[int] = mapped_column(BigInteger, default=0)

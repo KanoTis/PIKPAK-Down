@@ -341,6 +341,20 @@ async def list_job_files(
     return TaskListOut(items=[task_out(task) for task in rows], next_cursor=next_cursor)
 
 
+@router.post("/download-jobs/{job_id}/retry", response_model=DownloadJobOut)
+async def retry_job(job_id: str, session: AsyncSession = Depends(get_session)) -> DownloadJobOut:
+    try:
+        job = await service.retry_job(session, job_id)
+    except service.DownloadNotFound as exc:
+        raise _error(404, "JOB_NOT_FOUND", str(exc)) from exc
+    task_states = (
+        await session.execute(
+            select(DownloadTask.status).where(DownloadTask.job_id == job.id)
+        )
+    ).scalars().all()
+    return job_out(job, job_category(job, list(task_states)), list(task_states))
+
+
 @router.post("/download-jobs/{job_id}/cancel", response_model=DownloadJobOut)
 async def cancel_job(job_id: str, session: AsyncSession = Depends(get_session)) -> DownloadJobOut:
     try:

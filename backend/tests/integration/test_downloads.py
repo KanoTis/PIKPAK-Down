@@ -730,3 +730,258 @@ async def test_dispatch_plans_runs_concurrently(env, fake_server, monkeypatch) -
         await download._dispatch_plans(session)
 
     assert peak == 4
+
+
+@pytest.mark.asyncio
+async def test_tar_fallback_packs_and_starts_single_connection(env, fake_server, monkeypatch) -> None:
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+
+    class FakeClient:
+        def __init__(self):
+            self.calls: list[tuple] = []
+
+        async def create_folder(self, name):
+            self.calls.append(("create_folder", name))
+            return {"id": "TARFOLDER0000001"}
+
+        async def move_files(self, ids, folder_id):
+            self.calls.append(("move", ids, folder_id))
+            return {}
+
+        async def pack_folder(self, folder_id):
+            self.calls.append(("pack", folder_id))
+            return {"task_id": "TARPACK00000001"}
+
+        async def get_restore_task(self, task_id):
+            return {
+                "phase": "PHASE_TYPE_COMPLETE",
+                "file_id": "TARFILE000000001",
+                "params": {"total_size": "4096"},
+            }
+
+        async def batch_untrash(self, ids):
+            self.calls.append(("untrash", ids))
+            return {}
+
+        async def get_file(self, file_id, usage="FETCH"):
+            return {
+                "size": "4096",
+                "web_content_link": "http://example.test/tar?expire=4102444800",
+            }
+
+        async def delete_file(self, file_id):
+            return 200
+
+    class AccountStub:
+        id = "account-stub"
+
+    started: list[dict] = []
+
+    async def fake_delete(session, task, account, client):
+        task.remote_deleted_at = download.utcnow()
+        await session.commit()
+
+    async def fake_release(session, account_id, task_id):
+        return None
+
+    async def fake_start(session, task, url, status, **kwargs):
+        started.append({"url": url, "status": status, **kwargs})
+        task.status = TaskStatus.ACCOUNT_DOWNLOADING
+        await session.commit()
+
+    monkeypatch.setattr(download, "_delete_drive_file", fake_delete)
+    monkeypatch.setattr(download, "release_account", fake_release)
+    monkeypatch.setattr(download, "_start_aria2", fake_start)
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/TARTEST000000001",
+            share_id="TARTEST000000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        task = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARSOURCE0000001",
+            drive_file_id="TARSOURCE0000001",
+            name="video.mp4",
+            relative_path="video.mp4",
+            size=2048,
+            expected_hash="HASH",
+            status=TaskStatus.RESTORING,
+        )
+        session.add(task)
+        await session.commit()
+        client = FakeClient()
+        await download._handoff_via_tar(
+            session, job, task, AccountStub(), client
+        )
+        await session.refresh(task)
+        assert task.drive_file_id == "TARFILE000000001"
+        assert task.route == "tar"
+        assert task.tar_size == 4096
+        assert task.source_url_enc
+        assert started == [
+            {
+                "url": "http://example.test/tar?expire=4102444800",
+                "status": TaskStatus.ACCOUNT_DOWNLOADING,
+                "size": 4096,
+                "single_connection": True,
+            }
+        ]
+        assert ("pack", "TARFOLDER0000001") in client.calls
+
+
+@pytest.mark.asyncio
+async def test_daily_quota_switches_to_tar(env, fake_server, monkeypatch) -> None:
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.pikpak.errors import PikPakError
+    from app.services import download
+
+    class FakeClient:
+        async def ensure_access_token(self):
+            return None
+
+        async def about(self):
+            return {}
+
+        async def get_file(self, file_id, usage="FETCH"):
+            raise PikPakError(
+                "daily quota", code="daily_download_size_exceeded", status=400
+            )
+
+    class AccountStub:
+        id = "account-stub"
+        quota_limit = None
+        quota_usage = None
+
+    called: list[str] = []
+
+    async def fake_tar(session, job, task, account, client):
+        called.append(task.id)
+
+    monkeypatch.setattr(download, "_handoff_via_tar", fake_tar)
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/QUOTATEST0000001",
+            share_id="QUOTATEST0000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        task = DownloadTask(
+            job_id=job.id,
+            share_file_id="QUOTAFILE0000001",
+            drive_file_id="QUOTADRIVE000001",
+            restore_task_id="recovered",
+            restore_started_at=download.utcnow(),
+            name="video.mp4",
+            relative_path="video.mp4",
+            size=2048,
+            expected_hash="HASH",
+            status=TaskStatus.RESTORING,
+        )
+        session.add(task)
+        await session.commit()
+        await download._handoff_with_account(
+            session, job, task, AccountStub(), FakeClient()
+        )
+        assert called == [task.id]
+
+
+@pytest.mark.asyncio
+async def test_retry_job_requeues_failed_tasks(env, fake_server) -> None:
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/RETRYTEST0000001",
+            share_id="RETRYTEST0000001",
+            status=JobStatus.FAILED,
+        )
+        session.add(job)
+        await session.flush()
+        task = DownloadTask(
+            job_id=job.id,
+            share_file_id="RETRYFILE0000001",
+            name="retry.bin",
+            relative_path="retry.bin",
+            size=1,
+            status=TaskStatus.FAILED,
+            error_code="CDN_LINK_EXPIRED",
+        )
+        session.add(task)
+        await session.commit()
+
+        retried = await download.retry_job(session, job.id)
+        assert retried.status == JobStatus.READY
+        await session.refresh(task)
+        assert task.status == TaskStatus.DISCOVERED
+        assert task.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_tar_route_extracts_and_verifies(env, fake_server) -> None:
+    import io
+    import tarfile
+    from pathlib import Path
+
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+    from app.services.verifier import merkle_roots
+
+    payload = bytes(range(256)) * 1200
+    temp_root = Path(env.cache_dir) / "tar-verify"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    payload_path = temp_root / "payload.bin"
+    payload_path.write_bytes(payload)
+    roots = merkle_roots(payload_path)
+    hash_value = roots[256 * 1024]
+    archive = temp_root / "archive.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("video.bin")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/TARVERIFY0000001",
+            share_id="TARVERIFY0000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        task = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARVERIFYFILE0001",
+            name="video.bin",
+            relative_path="video.bin",
+            target_path="tar-verify/video.bin",
+            size=len(payload),
+            expected_hash=hash_value,
+            status=TaskStatus.VERIFYING,
+            route="tar",
+            tar_size=archive.stat().st_size,
+        )
+        session.add(task)
+        await session.commit()
+        cache_dir = Path(env.cache_dir) / task.id
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "download.bin").write_bytes(archive.read_bytes())
+
+        await download._verify_task(session, job, task)
+        await session.refresh(task)
+        assert task.status == TaskStatus.DONE
+        assert (Path(env.downloads_dir) / "tar-verify/video.bin").read_bytes() == payload

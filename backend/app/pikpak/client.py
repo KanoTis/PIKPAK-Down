@@ -623,7 +623,43 @@ class AccountPikPakClient(_BaseClient):
 
     async def get_file(self, file_id: str, usage: str = "FETCH") -> dict[str, Any]:
         response = await self._drive(
-            "GET", f"/drive/v1/files/{file_id}", params={"usage": usage}
+            "GET",
+            f"/drive/v1/files/{file_id}",
+            params={"usage": usage, "client_id": WEB_CLIENT_ID},
+        )
+        return response.json()
+
+    async def create_folder(
+        self, name: str, parent_id: str = "*"
+    ) -> dict[str, Any]:
+        response = await self._drive(
+            "POST",
+            "/drive/v1/files",
+            json_body={"kind": "drive#folder", "parent_id": parent_id, "name": name},
+        )
+        return response.json()
+
+    async def move_files(self, ids: list[str], parent_id: str) -> dict[str, Any]:
+        response = await self._drive(
+            "POST",
+            "/drive/v1/files:batchMove",
+            json_body={"ids": ids, "to": {"parent_id": parent_id}},
+        )
+        return response.json()
+
+    async def pack_folder(self, folder_id: str) -> dict[str, Any]:
+        response = await self._drive(
+            "POST",
+            "/drive/v1/files/pack",
+            json_body={"folderId": folder_id},
+        )
+        return response.json()
+
+    async def batch_untrash(self, ids: list[str]) -> dict[str, Any]:
+        response = await self._drive(
+            "POST",
+            "/drive/v1/files:batchUntrash",
+            json_body={"ids": ids},
         )
         return response.json()
 

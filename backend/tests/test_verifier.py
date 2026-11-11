@@ -39,3 +39,27 @@ def test_size_mismatch_fails(tmp_path) -> None:
 
 def test_missing_file_fails(tmp_path) -> None:
     assert not verify_file(tmp_path / "nope.bin", 1, "AA").ok
+
+
+def test_extract_tar_member_by_size_and_name(tmp_path):
+    import io
+    import tarfile
+
+    from app.services.verifier import extract_tar_member
+
+    payload = b"x" * 2048
+    archive = tmp_path / "data.tar"
+    with tarfile.open(archive, "w") as tar:
+        info = tarfile.TarInfo("video.mp4")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+        other = tarfile.TarInfo("other.bin")
+        other.size = 16
+        tar.addfile(other, io.BytesIO(b"y" * 16))
+
+    output = tmp_path / "out.mp4"
+    assert extract_tar_member(
+        archive, output, expected_size=len(payload), expected_name="video.mp4"
+    )
+    assert output.read_bytes() == payload
+    assert not extract_tar_member(archive, tmp_path / "missing", expected_size=99)

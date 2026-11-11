@@ -53,7 +53,7 @@ from .accounts import (
 )
 from .cleanup import enqueue_cleanup
 from .planner import DownloadPlan, anonymous_plan
-from .verifier import verify_file
+from .verifier import extract_tar_member, verify_file
 from .windows import probe_tail_exact, probe_with_retries
 
 log = structlog.get_logger(__name__)
@@ -1250,16 +1250,24 @@ async def _finish_empty_task(
 
 
 async def _start_aria2(
-    session: AsyncSession, task: DownloadTask, url: str, status: str
+    session: AsyncSession,
+    task: DownloadTask,
+    url: str,
+    status: str,
+    *,
+    size: int | None = None,
+    single_connection: bool = False,
 ) -> None:
     if not url:
         raise PikPakError("empty download url", code="EMPTY_URL", retryable=True)
     if not aria2.available:
         raise PikPakError("aria2 不可用", code="ARIA2_UNAVAILABLE", retryable=True)
     directory = get_settings().cache_dir / task.id
-    gid = await aria2.add_uri(url, directory, "download.bin")
+    gid = await aria2.add_uri(
+        url, directory, "download.bin", single_connection=single_connection
+    )
     task.aria2_gid = gid
-    task.bytes_total = task.size
+    task.bytes_total = int(size or task.size)
     task.speed = 0
     task.error_code = None
     task.error_message = None
@@ -1353,6 +1361,121 @@ async def run_account_handoff(session: AsyncSession, task_id: str) -> None:
         await client.close()
 
 
+async def _handoff_via_tar(
+    session: AsyncSession,
+    job: DownloadJob,
+    task: DownloadTask,
+    account: Account,
+    client,
+) -> None:
+    if not task.drive_file_id:
+        raise PikPakError("缺少已转存文件，无法打包", code="TAR_NO_SOURCE", retryable=True)
+    folder_name = f"pikpak_tar_{task.id[:8]}"
+    folder = await client.create_folder(folder_name)
+    folder_id = str(folder.get("id") or "")
+    if not folder_id:
+        raise PikPakError("创建打包目录失败", code="TAR_FOLDER_FAILED", retryable=True)
+    task.tar_folder_id = folder_id
+    await client.move_files([task.drive_file_id], folder_id)
+    await session.commit()
+
+    packed = await client.pack_folder(folder_id)
+    pack_task_id = str(packed.get("task_id") or "")
+    if not pack_task_id:
+        raise PikPakError("pack 未返回任务", code="TAR_PACK_FAILED", retryable=True)
+
+    deadline = int(utcnow().timestamp()) + 300
+    tar_id = ""
+    tar_size = 0
+    while int(utcnow().timestamp()) < deadline:
+        state = await client.get_restore_task(pack_task_id)
+        phase = str(state.get("phase") or "").upper()
+        message = str(state.get("message") or "").lower()
+        if phase in ("PHASE_TYPE_COMPLETE", "COMPLETE") or message == "completed":
+            tar_id = str(state.get("file_id") or "")
+            params = state.get("params") or {}
+            try:
+                tar_size = int(params.get("total_size") or 0)
+            except (TypeError, ValueError):
+                tar_size = 0
+            break
+        if phase in ("PHASE_TYPE_ERROR", "ERROR") or message in ("error", "failed"):
+            raise PikPakError(
+                f"pack 失败: {state.get('message') or state}",
+                code="TAR_PACK_FAILED",
+                retryable=True,
+            )
+        await renew_lease(session, account.id, task.id)
+        await asyncio.sleep(3)
+    if not tar_id:
+        raise PikPakError("pack 超时", code="TAR_PACK_TIMEOUT", retryable=True)
+
+    task.drive_file_id = tar_id
+    task.tar_size = tar_size
+    task.remote_deleted_at = None
+    task.error_code = None
+    task.error_message = None
+    await session.commit()
+
+    try:
+        await client.batch_untrash([tar_id])
+    except PikPakError:
+        log.warning("tar_untrash_failed", task_id=task.id, tar_id=tar_id)
+
+    drive = await client.get_file(tar_id, usage="FETCH")
+    wcl = str(drive.get("web_content_link") or "")
+    if not wcl:
+        raise PikPakError(
+            "tar 未签发直链",
+            code="TAR_WCL_MISSING",
+            retryable=False,
+        )
+    if not tar_size:
+        try:
+            tar_size = int(drive.get("size") or 0)
+        except (TypeError, ValueError):
+            tar_size = 0
+    if not tar_size:
+        raise PikPakError("tar 大小未知", code="TAR_SIZE_MISSING", retryable=False)
+
+    task.tar_size = tar_size
+    task.source_url_enc = encrypt(wcl)
+    task.source_url_expire = _url_expire(wcl)
+    task.source_share_id = job.share_id
+    task.source_file_id = task.share_file_id
+    task.route = "tar"
+    task.error_code = None
+    task.error_message = None
+    await session.commit()
+
+    await _delete_drive_file(session, task, account, client)
+    await release_account(session, account.id, task.id)
+    await session.commit()
+
+    try:
+        await _start_aria2(
+            session,
+            task,
+            wcl,
+            TaskStatus.ACCOUNT_DOWNLOADING,
+            size=tar_size,
+            single_connection=True,
+        )
+    except PikPakError as exc:
+        task.error_code = exc.code or "ARIA2_UNAVAILABLE"
+        task.error_message = str(exc)
+        task.download_cycles += 1
+        if task.download_cycles >= 3:
+            _set_status(task, TaskStatus.FAILED)
+            task.finished_at = utcnow()
+        else:
+            task.queue_reason = "ARIA2_UNAVAILABLE"
+            _set_status(task, TaskStatus.WCL_READY)
+        await session.commit()
+        return
+    await session.commit()
+
+
 async def _handoff_with_account(
     session: AsyncSession,
     job: DownloadJob,
@@ -1368,8 +1491,9 @@ async def _handoff_with_account(
                 await _delete_drive_file(session, task, account, client)
             await release_account(session, account.id, task.id)
             await session.commit()
-            if not await probe_with_retries(
-                wcl, task.size, limiter=await window_limiter()
+            expected_size = task.tar_size if task.route == "tar" else task.size
+            if task.route != "tar" and not await probe_with_retries(
+                wcl, expected_size, limiter=await window_limiter()
             ):
                 await _clear_account_link(session, task)
                 task.download_cycles += 1
@@ -1384,7 +1508,14 @@ async def _handoff_with_account(
                 await session.commit()
                 return
             try:
-                await _start_aria2(session, task, wcl, TaskStatus.ACCOUNT_DOWNLOADING)
+                await _start_aria2(
+                    session,
+                    task,
+                    wcl,
+                    TaskStatus.ACCOUNT_DOWNLOADING,
+                    size=expected_size,
+                    single_connection=task.route == "tar",
+                )
             except PikPakError as exc:
                 task.error_code = exc.code or "ARIA2_UNAVAILABLE"
                 task.error_message = str(exc)
@@ -1488,6 +1619,11 @@ async def _handoff_with_account(
         await release_account(session, account.id, task.id)
         await session.commit()
         return
+    except PikPakError as exc:
+        if exc.code == "daily_download_size_exceeded":
+            await _handoff_via_tar(session, job, task, account, client)
+            return
+        raise
     wcl = str(drive.get("web_content_link") or "")
     if not wcl:
         global_kind = int((drive.get("params") or {}).get("global_file_kind") or 0)
@@ -1669,6 +1805,8 @@ async def _clear_account_link(session: AsyncSession, task: DownloadTask) -> None
     task.restore_folder_id = None
     task.restore_started_at = None
     task.remote_deleted_at = None
+    task.tar_size = 0
+    task.tar_folder_id = None
     task.aria2_gid = None
     await session.flush()
 
@@ -1684,6 +1822,12 @@ async def _handle_handoff_error(
     if task.drive_file_id and not task.remote_deleted_at:
         cleanup_client = make_client(account)
         try:
+            if task.tar_folder_id:
+                try:
+                    await cleanup_client.delete_file(task.tar_folder_id)
+                except (NotFound, PikPakError):
+                    pass
+                task.tar_folder_id = None
             await _delete_drive_file(session, task, account, cleanup_client)
         except Exception:  # noqa: BLE001
             pass
@@ -1758,7 +1902,7 @@ async def _poll_downloads(session: AsyncSession) -> None:
 async def _requeue_lost_download(session: AsyncSession, task: DownloadTask) -> None:
     task.aria2_gid = None
     task.speed = 0
-    if task.route == "account":
+    if task.route in ("account", "tar"):
         await _clear_account_link(session, task)
         task.download_cycles += 1
         if task.download_cycles >= 3:
@@ -1781,7 +1925,7 @@ async def _handle_download_failure(
     task.error_message = message
     task.speed = 0
     task.aria2_gid = None
-    if task.route == "account":
+    if task.route in ("account", "tar"):
         await _clear_account_link(session, task)
         task.download_cycles += 1
         if task.download_cycles >= 3:
@@ -1815,9 +1959,34 @@ async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTa
         await _refresh_job(session, job)
         await session.commit()
         return
-    temp = get_settings().cache_dir / task.id / "download.bin"
-    result = await asyncio.to_thread(verify_file, temp, task.size, task.expected_hash)
-    if result.ok:
+    settings = get_settings()
+    temp = settings.cache_dir / task.id / "download.bin"
+    if task.route == "tar":
+        if not task.tar_size or not temp.is_file() or temp.stat().st_size != task.tar_size:
+            result = None
+        else:
+            extracted = settings.cache_dir / task.id / "extracted.bin"
+            extracted_ok = await asyncio.to_thread(
+                extract_tar_member,
+                temp,
+                extracted,
+                expected_size=task.size,
+                expected_name=task.name,
+            )
+            result = (
+                await asyncio.to_thread(
+                    verify_file, extracted, task.size, task.expected_hash
+                )
+                if extracted_ok
+                else None
+            )
+            if result is not None and result.ok:
+                temp = extracted
+    else:
+        result = await asyncio.to_thread(
+            verify_file, temp, task.size, task.expected_hash
+        )
+    if result is not None and result.ok:
         settings = get_settings()
         relative = task.target_path or _join_relative(
             job.target_subdir, task.relative_path
@@ -1903,6 +2072,8 @@ async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTa
     task.verify_attempts += 1
     temp.unlink(missing_ok=True)
     Path(str(temp) + ".aria2").unlink(missing_ok=True)
+    if task.route == "tar":
+        shutil.rmtree(get_settings().cache_dir / task.id, ignore_errors=True)
     task.aria2_gid = None
     task.bytes_done = 0
     task.speed = 0
@@ -2032,6 +2203,8 @@ async def retry_task(session: AsyncSession, task_id: str) -> DownloadTask:
     task.restore_folder_id = None
     task.restore_started_at = None
     task.remote_deleted_at = None
+    task.tar_size = 0
+    task.tar_folder_id = None
     task.finished_at = None
     _set_status(task, TaskStatus.DISCOVERED)
     job = await session.get(DownloadJob, task.job_id)
@@ -2045,6 +2218,27 @@ async def retry_task(session: AsyncSession, task_id: str) -> DownloadTask:
     events.emit(session, "download_task", task.id, "download_task.retried", {})
     await session.commit()
     return task
+
+
+async def retry_job(session: AsyncSession, job_id: str) -> DownloadJob:
+    job = await _get_job(session, job_id)
+    tasks = (
+        await session.execute(
+            select(DownloadTask).where(
+                DownloadTask.job_id == job.id,
+                DownloadTask.status.in_([TaskStatus.FAILED, TaskStatus.CANCELLED]),
+            )
+        )
+    ).scalars().all()
+    for task in tasks:
+        await retry_task(session, task.id)
+    job.status = JobStatus.READY
+    job.finished_at = None
+    job.error_code = None
+    job.error_message = None
+    await _refresh_job(session, job)
+    await session.commit()
+    return job
 
 
 async def cancel_job(session: AsyncSession, job_id: str) -> DownloadJob:

@@ -174,14 +174,20 @@ class Aria2Manager:
             [{"max-concurrent-downloads": str(max(1, value))}],
         )
 
-    async def add_uri(self, url: str, directory: Path, out: str) -> str:
+    async def add_uri(
+        self, url: str, directory: Path, out: str, *, single_connection: bool = False
+    ) -> str:
         directory.mkdir(parents=True, exist_ok=True)
         options = {
             "dir": str(directory),
             "out": out,
             "continue": "true",
-            "split": str(self.settings.aria2_split),
-            "max-connection-per-server": str(self.settings.aria2_max_connection_per_server),
+            "split": "1" if single_connection else str(self.settings.aria2_split),
+            "max-connection-per-server": (
+                "1"
+                if single_connection
+                else str(self.settings.aria2_max_connection_per_server)
+            ),
             "min-split-size": self.settings.aria2_min_split_size,
             "max-tries": "5",
             "retry-wait": "2",
