@@ -127,6 +127,45 @@ async def refresh_account(
     return account_out(account)
 
 
+@router.post("/accounts/{account_id}/reconcile")
+async def reconcile_account(
+    account_id: str, session: AsyncSession = Depends(get_session)
+) -> dict:
+    account = await session.get(Account, account_id)
+    if account is None:
+        raise _error(404, "ACCOUNT_NOT_FOUND", "账号不存在")
+    client = make_client(account)
+    try:
+        about = await client.about()
+        before = dict(about.get("quota") or {})
+        from ..services.download import (
+            _cleanup_stale_tar_folders,
+            reconcile_account_files,
+        )
+
+        folders = await _cleanup_stale_tar_folders(session, client)
+        files = await reconcile_account_files(session, account, client)
+        about = await client.about()
+        await update_quota_from_about(account, about)
+        await session.commit()
+        after = dict(about.get("quota") or {})
+    except Unauthorized as exc:
+        await session.commit()
+        raise _error(400, "ACCOUNT_TOKEN_INVALID", str(exc)) from exc
+    except PikPakError as exc:
+        await session.commit()
+        raise _error(502, "ACCOUNT_RECONCILE_FAILED", str(exc)) from exc
+    finally:
+        await client.close()
+    return {
+        "account_id": account.id,
+        "tar_folders_removed": folders,
+        "files": files,
+        "quota_before": before,
+        "quota_after": after,
+    }
+
+
 @router.post("/accounts/{account_id}/enable", response_model=AccountOut)
 async def enable_account(
     account_id: str, session: AsyncSession = Depends(get_session)

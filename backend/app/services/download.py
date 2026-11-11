@@ -4,11 +4,12 @@ import asyncio
 import os
 import random
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import structlog
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..aria2 import Aria2Error, aria2
@@ -1552,6 +1553,14 @@ async def _handoff_with_account(
             await update_quota_from_about(account, about)
             await session.commit()
     if not quota_available(account, task.size):
+        now = time.monotonic()
+        if now - _RECONCILE_AT.get(account.id, 0.0) > 300:
+            _RECONCILE_AT[account.id] = now
+            await reconcile_account_files(session, account, client)
+            about = await client.about()
+            await update_quota_from_about(account, about)
+            await session.commit()
+    if not quota_available(account, task.size):
         await release_account(session, account.id, task.id)
         task.queue_reason = "NO_QUOTA"
         _set_status(task, TaskStatus.ACCOUNT_QUEUED)
@@ -1786,6 +1795,7 @@ async def _find_in_folder(client, folder_id: str, task: DownloadTask) -> str | N
 
 
 TAR_FOLDER_PREFIX = "pikpak_tar_"
+_RECONCILE_AT: dict[str, float] = {}
 _ACTIVE_TAR_STATES = {
     TaskStatus.PLANNING,
     TaskStatus.ANON_DOWNLOADING,
@@ -1868,6 +1878,106 @@ async def _cleanup_stale_tar_folders(
         await session.commit()
         log.info("stale_tar_folders_removed", count=removed)
     return removed
+
+
+async def reconcile_account_files(
+    session: AsyncSession,
+    account: Account,
+    client,
+) -> dict[str, int]:
+    """Delete app-created restore folders left by terminal tasks.
+
+    Restored files live inside the folder returned by the restore API, so
+    deleting that folder recursively is both cheaper and more reliable than
+    deleting every file one by one.
+    """
+    rows = (
+        await session.execute(
+            select(
+                DownloadTask.id,
+                DownloadTask.restore_folder_id,
+                DownloadTask.drive_file_id,
+            ).where(
+                DownloadTask.account_id == account.id,
+                DownloadTask.status.in_(TaskStatus.TERMINAL),
+            )
+        )
+    ).all()
+    folders: dict[str, list[str]] = {}
+    direct: dict[str, list[str]] = {}
+    for task_id, folder_id, file_id in rows:
+        if folder_id:
+            folders.setdefault(str(folder_id), []).append(task_id)
+        elif file_id:
+            direct.setdefault(str(file_id), []).append(task_id)
+
+    active_folders = set(
+        (
+            await session.execute(
+                select(DownloadTask.restore_folder_id).where(
+                    DownloadTask.account_id == account.id,
+                    DownloadTask.status.notin_(TaskStatus.TERMINAL),
+                    DownloadTask.restore_folder_id.is_not(None),
+                )
+            )
+        ).scalars().all()
+    )
+
+    removed_folders = 0
+    failed = 0
+    for folder_id, task_ids in folders.items():
+        if folder_id in active_folders:
+            continue
+        try:
+            await client.delete_file(folder_id)
+        except NotFound:
+            pass
+        except PikPakError as exc:
+            failed += 1
+            log.warning(
+                "reconcile_folder_failed",
+                account_id=account.id,
+                folder_id=folder_id,
+                error=str(exc),
+            )
+            continue
+        removed_folders += 1
+        await session.execute(
+            update(DownloadTask)
+            .where(DownloadTask.id.in_(task_ids))
+            .values(remote_deleted_at=utcnow())
+        )
+        await session.commit()
+
+    removed_files = 0
+    for file_id, task_ids in direct.items():
+        try:
+            await client.delete_file(file_id)
+        except NotFound:
+            pass
+        except PikPakError as exc:
+            failed += 1
+            log.warning(
+                "reconcile_file_failed",
+                account_id=account.id,
+                file_id=file_id,
+                error=str(exc),
+            )
+            continue
+        removed_files += 1
+        await session.execute(
+            update(DownloadTask)
+            .where(DownloadTask.id.in_(task_ids))
+            .values(remote_deleted_at=utcnow())
+        )
+        await session.commit()
+
+    return {
+        "tracked": len(rows),
+        "folders_removed": removed_folders,
+        "files_removed": removed_files,
+        "failed": failed,
+    }
 
 
 async def _delete_tar_folder(session: AsyncSession, task: DownloadTask) -> None:

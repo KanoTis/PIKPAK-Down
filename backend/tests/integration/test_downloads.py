@@ -978,6 +978,75 @@ async def test_dispatch_handoffs_survives_rollback_between_tasks(env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reconcile_account_files_deletes_tracked_terminal_files(env) -> None:
+    from app.db import get_session_factory
+    from app.models import Account, DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+
+    class FakeReconcileClient:
+        def __init__(self) -> None:
+            self.deleted: list[list[str]] = []
+
+        async def delete_files(self, file_ids: list[str]) -> int:
+            self.deleted.append(list(file_ids))
+            return 200
+
+        async def delete_file(self, file_id: str) -> int:
+            self.deleted.append([file_id])
+            return 200
+
+    factory = get_session_factory()
+    async with factory() as session:
+        account = Account(
+            label="reconcile",
+            device_id="reconcile-device",
+            refresh_token_enc="token",
+        )
+        session.add(account)
+        await session.flush()
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/RECONCILE0000001",
+            share_id="RECONCILE0000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        tasks = [
+            DownloadTask(
+                job_id=job.id,
+                account_id=account.id,
+                share_file_id=f"RECONCILEFILE{index}",
+                drive_file_id=f"RECONCILEFILE000{index}",
+                restore_folder_id=(
+                    "RECONCILEFOLDER001" if index == 1 else None
+                ),
+                name=f"reconcile-{index}.bin",
+                relative_path=f"reconcile-{index}.bin",
+                size=1,
+                expected_hash="HASH",
+                status=TaskStatus.DONE,
+            )
+            for index in (1, 2)
+        ]
+        session.add_all(tasks)
+        await session.commit()
+        client = FakeReconcileClient()
+        result = await download.reconcile_account_files(session, account, client)
+        await session.refresh(tasks[0])
+        await session.refresh(tasks[1])
+
+    assert result == {
+        "tracked": 2,
+        "folders_removed": 1,
+        "files_removed": 1,
+        "failed": 0,
+    }
+    assert client.deleted == [["RECONCILEFOLDER001"], ["RECONCILEFILE0002"]]
+    assert tasks[0].remote_deleted_at is not None
+    assert tasks[1].remote_deleted_at is not None
+
+
+@pytest.mark.asyncio
 async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
     from app.db import get_session_factory
     from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus

@@ -71,6 +71,59 @@ async def test_pause_resume_cancel_retry_state_machine(env, fake_server) -> None
 
 
 @pytest.mark.asyncio
+async def test_reconcile_endpoint_removes_terminal_restore_folder(env, fake_server) -> None:
+    from app.db import get_session_factory
+    from app.main import app
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services.accounts import import_account
+
+    factory = get_session_factory()
+    async with factory() as session:
+        account = await import_account(
+            session,
+            label="reconcile-api",
+            email=None,
+            refresh_token="fake-refresh-token",
+        )
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/RECONCILEAPI00001",
+            share_id="RECONCILEAPI00001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        task = DownloadTask(
+            job_id=job.id,
+            account_id=account.id,
+            share_file_id="RECONCILEAPIFILE01",
+            drive_file_id="RECONCILEAPIFILE01",
+            restore_folder_id="RESTORE_FOLDER",
+            name="reconcile-api.bin",
+            relative_path="reconcile-api.bin",
+            size=1,
+            expected_hash="HASH",
+            status=TaskStatus.DONE,
+        )
+        session.add(task)
+        await session.commit()
+        account_id = account.id
+        task_id = task.id
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(f"/api/accounts/{account_id}/reconcile")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tar_folders_removed"] == 0
+    assert body["files"]["folders_removed"] == 1
+    assert "quota_before" in body and "quota_after" in body
+
+    async with factory() as session:
+        task = await session.get(DownloadTask, task_id)
+        assert task.remote_deleted_at is not None
+
+
+@pytest.mark.asyncio
 async def test_pause_retries_when_database_is_locked(env, fake_server) -> None:
     import sqlite3
 
