@@ -218,6 +218,19 @@ async def list_copies(
     }
 
 
+@router.post("/lineage-runs/{run_id}/resume", response_model=LineageRunOut)
+async def resume_lineage_run(
+    run_id: str, session: AsyncSession = Depends(get_session)
+) -> LineageRunOut:
+    try:
+        run = await service.resume_run(session, run_id)
+    except service.LineageNotFound as exc:
+        raise _error(404, "RUN_NOT_FOUND", str(exc)) from exc
+    except service.LineageStateConflict as exc:
+        raise _error(409, "STATE_CONFLICT", str(exc)) from exc
+    return run_out(run)
+
+
 @router.post("/lineage-runs/{run_id}/cancel", response_model=LineageRunOut)
 async def cancel_lineage_run(
     run_id: str, session: AsyncSession = Depends(get_session)

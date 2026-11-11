@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -368,3 +369,43 @@ async def test_graph_selection_limits_start_share(env, fake_server) -> None:
         (GRAPH_A_SHARE, GRAPH_B_SHARE),
         (GRAPH_B_SHARE, GRAPH_D_SHARE),
     }
+
+@pytest.mark.asyncio
+async def test_resume_truncated_graph_run_resets_pending_work(env) -> None:
+    from app.db import get_session_factory
+    from app.models import LineageGraphShare, LineageRun
+    from app.services.lineage import resume_run
+
+    factory = get_session_factory()
+    async with factory() as session:
+        run = LineageRun(
+            input_type="share_graph",
+            input_json='{"input": "https://mypikpak.com/s/RESUMEGRAPH0001"}',
+            share_id="RESUMEGRAPH0001",
+            status="DONE",
+            truncated=True,
+            termination="budget_exhausted",
+            finished_at=datetime.now(UTC),
+        )
+        session.add(run)
+        await session.flush()
+        share = LineageGraphShare(
+            run_id=run.id,
+            share_id="RESUMEGRAPH0001",
+            depth=0,
+            role="start",
+            state="ENUMERATING",
+        )
+        session.add(share)
+        await session.commit()
+        run_id = run.id
+        share_id = share.id
+
+    async with factory() as session:
+        resumed = await resume_run(session, run_id)
+        assert resumed.truncated is False
+        assert resumed.termination is None
+        assert resumed.finished_at is None
+        assert resumed.status == "ENUMERATING"
+        share = await session.get(LineageGraphShare, share_id)
+        assert share.state == "PENDING"

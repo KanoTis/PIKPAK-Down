@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { Badge, Button, Card, Flex, Text } from "@radix-ui/themes";
-import { ArrowLeft, Download, GitBranch, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, Download, GitBranch, Play, RefreshCw, X } from "lucide-react";
 import {
   client,
   errorMessage,
@@ -224,6 +224,19 @@ export function LineageRunPage() {
     },
   });
 
+  const resumeRun = useMutation({
+    mutationFn: async () =>
+      unwrap(
+        await client.POST("/api/lineage-runs/{run_id}/resume", {
+          params: { path: { run_id: runId } },
+        }),
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["lineage-run", runId] });
+      void queryClient.invalidateQueries({ queryKey: ["lineage-runs"] });
+    },
+  });
+
   const enrichNames = useMutation({
     mutationFn: async () =>
       unwrap(
@@ -310,6 +323,17 @@ export function LineageRunPage() {
                 <ArrowLeft size={15} aria-hidden /> 返回
               </a>
             </Button>
+            {isGraphRun && report?.truncated ? (
+              <Button
+                variant="soft"
+                color="green"
+                onClick={() => resumeRun.mutate()}
+                disabled={resumeRun.isPending}
+              >
+                <Play size={14} aria-hidden />
+                {resumeRun.isPending ? "继续中" : "继续运行"}
+              </Button>
+            ) : null}
             {isGraphRun && graph?.nodes.some((node) => node.name_known === false) ? (
               <Button
                 variant="soft"
@@ -351,7 +375,7 @@ export function LineageRunPage() {
       <ErrorBanner message={report.error?.message} />
       {report.truncated ? (
         <div style={{ marginBottom: 10 }}>
-          <InfoBanner message="预算已耗尽：图为部分结果，可调高 lineage 预算后重建。" />
+          <InfoBanner message="预算已耗尽：图为部分结果。调高 lineage 预算后点“继续运行”，或重新创建运行。" />
         </div>
       ) : null}
       {!isGraphRun ? (

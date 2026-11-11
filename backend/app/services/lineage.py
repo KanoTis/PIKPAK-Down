@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import structlog
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
@@ -1364,6 +1364,52 @@ async def get_run(session: AsyncSession, run_id: str) -> LineageRun:
     run = await session.get(LineageRun, run_id)
     if run is None:
         raise LineageNotFound("溯源任务不存在")
+    return run
+
+
+async def resume_run(session: AsyncSession, run_id: str) -> LineageRun:
+    run = await get_run(session, run_id)
+    if run.input_type != "share_graph":
+        raise LineageStateConflict("只有全量血缘图支持继续运行")
+    if not run.truncated:
+        raise LineageStateConflict("该运行没有被预算截断")
+    if run.status != LineageStatus.DONE:
+        raise LineageStateConflict("只有已完成的截断运行可以继续")
+    await session.execute(
+        update(LineageGraphShare)
+        .where(
+            LineageGraphShare.run_id == run.id,
+            LineageGraphShare.state.in_(
+                ["PENDING", "ENUMERATING", "BUDGET"]
+            ),
+        )
+        .values(state="PENDING", error_code=None, error_message=None)
+    )
+    await session.execute(
+        update(LineageGraphFolder)
+        .where(
+            LineageGraphFolder.run_id == run.id,
+            LineageGraphFolder.state.in_(["PENDING", "ENUMERATING"]),
+        )
+        .values(state="PENDING")
+    )
+    start = (
+        await session.execute(
+            select(LineageGraphShare.id).where(
+                LineageGraphShare.run_id == run.id,
+                LineageGraphShare.role == "start",
+            )
+        )
+    ).first()
+    run.truncated = False
+    run.termination = None
+    run.error_code = None
+    run.error_message = None
+    run.finished_at = None
+    run.status = LineageStatus.ENUMERATING if start else LineageStatus.RESOLVING
+    run.updated_at = utcnow()
+    events.emit(session, "lineage_run", run.id, "lineage_run.resumed", {})
+    await session.commit()
     return run
 
 
