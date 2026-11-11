@@ -519,8 +519,8 @@ def _file_info(share_id: str, file_id: str, base: str) -> dict[str, Any] | None:
             },
         }
     if share_id == GRAPH_B_SHARE and file_id in (GRAPH_B_FILE1, GRAPH_B_FILE2):
-        origin_share = GRAPH_D_SHARE if file_id == GRAPH_B_FILE1 else ""
-        origin_file = GRAPH_D_FILE if file_id == GRAPH_B_FILE1 else ""
+        origin_share = GRAPH_D_SHARE if file_id == GRAPH_B_FILE1 else GRAPH_C_SHARE
+        origin_file = GRAPH_D_FILE if file_id == GRAPH_B_FILE1 else GRAPH_C_FILE1
         return {
             "id": file_id,
             "kind": "drive#file",

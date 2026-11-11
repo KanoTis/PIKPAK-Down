@@ -3,7 +3,7 @@
 单容器、单用户的 PikPak 分享下载与血缘溯源 Web 应用。
 
 - **下载**：先解析分享并展示全部文件/文件夹（自动翻页，不再需要“加载更多”），可按名称/类型/大小正反排序，默认按名称升序；勾选需要的内容、选择挂载下载目录中的目标位置后再创建任务。同一分享 + 同一目标位置会合并到现有任务，而不是新建；任务页按下载/队列/失败/成功四个分类展示，同一分类内重复分享合并为一行并显示合并任务数；任务子页也按同样四个分类筛选文件。非视频或 `anonymous_play_range=1.00` 的视频走匿名直链；否则从账号池转存、取登录态 `web_content_link` 后**立即删除云盘文件**，再下载并校验 `size + Merkle-gcid`。最终文件按分享文件夹结构写入 `/downloads/<目标子目录>/<相对路径>`，临时分片放在独立的 `/cache/<task-id>/`。
-- **血缘**：全量血缘图从分享起点枚举全部文件，按 `params.original_share_id` / `original_file_id` 逐层去重展开上游分享，聚合文件级证据为分享级边；同时保留单目标直系链、文件夹链、tenant refs、同指纹副本、匿名窗口与终止点。血缘页先解析分享并勾选文件/文件夹，再创建运行；图页面使用 Cytoscape.js 渲染，按深度分层，每个层级一列纵向排列；默认只绘制聚焦线路，悬停节点高亮关联节点（连接过多时不铺线），点击节点打开详情。未展开的分享显示“未展开分享”和来源文件路径，可用“补齐名称”只拉取分享元数据、不展开内容。
+- **血缘**：全量血缘图从分享起点枚举勾选的文件/文件夹；上游分享只解析目标文件通过 `params.original_share_id` / `original_file_id` 指向的具体文件，**不展开同一上游分享里的其他文件/目录**，因此不会把无关的 C 文件继续溯源。聚合文件级证据为分享级边；同时保留单目标直系链、文件夹链、tenant refs、同指纹副本、匿名窗口与终止点。血缘页先解析分享并勾选文件/文件夹，再创建运行；图页面使用 Cytoscape.js 渲染，按深度分层，每个层级一列纵向排列；默认只绘制聚焦线路，悬停节点高亮关联节点（连接过多时不铺线），点击节点打开详情。未展开的分享显示“未展开分享”和来源文件路径，可用“补齐名称”只拉取分享元数据、不展开内容。
 - **账号池**：只导入人工取得的 `refresh_token`；不自动注册、不处理验证码、不保存登录密码。
 
 ## 快速启动
@@ -114,12 +114,12 @@ CACHE_DIR=/cache         下载临时目录
 - `POST/GET /api/download-jobs`（创建时 `target_subdir` 选择下载位置；同一分享与目标位置自动合并选择项）、`GET /api/download-jobs/{id}`、`GET /api/download-jobs/{id}/files`、`POST /api/download-jobs/{id}/cancel`、`DELETE /api/download-jobs/{id}`
 - `GET /api/downloads/{id}`、`POST /api/downloads/{id}/pause|resume|retry|cancel`、`GET /api/downloads/{id}/file`
 - `GET/POST /api/accounts`、`POST /api/accounts/{id}/refresh|enable|disable`、`DELETE /api/accounts/{id}`、`GET /api/cleanups`
-- `POST /api/lineage-runs`：`graph: true` 创建血缘图运行；可带 `items` 只展开勾选的文件/文件夹，不传则遍历整个分享
+- `POST /api/lineage-runs`：`graph: true` 创建血缘图运行；可带 `items` 只展开勾选的文件/文件夹，不传则遍历整个起始分享。无论哪种方式，上游分享都只解析目标文件引用的具体文件，不展开同分享的其他内容
 - `GET /api/lineage-runs`、`GET /api/lineage-runs/{id}`（报告内含 `graph.nodes` / `graph.edges`）
 - `GET /api/lineage-runs/{id}/graph/shares/{share_id}`：节点详情、来源文件、分享内容、派生去向
 - `POST /api/lineage-runs/{id}/graph/enrich`：为预算截断的节点补齐分享名称（不枚举内容）
 
-全量图预算按深度推进：先完成当前层的分享与目录，再进入下一层；不会在 L1 未完成时展开 L2。同一层内按分享逐个展开，单个超大分享可能先耗尽预算，导致同层其他分享和更深层节点被标记为“预算截断”。
+全量图预算按深度推进：先完成当前层的分享与起始分享目录，再进入下一层；不会在 L1 未完成时展开 L2。同一层内按分享逐个展开；上游分享只请求目标文件，不再枚举整份分享。
 - `GET /api/lineage-runs/{id}/copies`、`POST /api/lineage-runs/{id}/cancel`、`DELETE /api/lineage-runs/{id}`、`GET /api/lineage-runs/{id}/export?format=json|markdown|dot`
 - `GET /api/events`：SSE，支持 `Last-Event-ID` / `after` 补发
 - `GET /api/health`：DB、aria2、数据目录可写
@@ -144,7 +144,7 @@ uv run pytest backend/tests/integration -q
 - 下载结构：最终文件写入 `DOWNLOADS_DIR/<target_subdir>/<分享相对路径>`，文件夹选择保留子树；临时文件在 `CACHE_DIR/<task-id>/download.bin`，成功后原子移动/跨挂载复制，失败或取消时删除。
 - 后端测试：`47 passed`（captcha 向量、Merkle 向量、窗口并集、下载/转存/删除顺序、清理重试、匿名/账号/文件夹下载、预览与勾选下载、嵌套目录选择、断点重启、状态机、错误契约、血缘直系/文件夹/tenant refs/窗口、全量图 BFS 去重与图 API）。
 - 删除：下载任务与血缘运行在列表页可删除；运行中的任务需先取消。删除下载任务会移除任务记录，删除不再被其他任务引用的下载文件，云端待清理项继续执行；删除血缘运行会移除节点/边/快照/图数据与证据目录。
-- 全量图 UI：真实分享回归得到 83 个分享节点、48,641 个文件、1,359 个目录；层级为 L0 起点 → L1 直接上游 → L2 二级上游 → L3 三级上游。验证图例筛选、缩放/适应画布、节点详情来源文件、分享内容分页（500 → 1,000）。命中 `LINEAGE_MAX_ITEMS=50000` 时报告 `budget_exhausted`，未展开节点标记为“预算截断”并在详情提示。
+- 全量图 UI：集成回归覆盖 L0 起点 → L1 直接上游 → L2 二级上游，验证图例筛选、缩放/适应画布、节点详情来源文件与分享内容。旧基线（83 个分享、48,641 个文件）来自“上游分享全量展开”，改为只解析目标文件后不再适用，需要按新语义重跑真实分享基线。命中 `LINEAGE_MAX_ITEMS=50000` 时报告 `budget_exhausted`，未展开节点标记为“预算截断”并在详情提示。
 - Docker 端到端：`docker build` 成功；容器以 UID 10001 运行；`/api/health` 200；SSE 事件补发；账号转存后删除时间早于 aria2 首个请求；浏览器保存文件 Merkle 与声明一致；1440×900 与 390×844 页面检查通过。
 - 真实账号 restore 冒烟未执行：未提供专用 `LIVE_REFRESH_TOKEN` / `LIVE_SHARE_URL`；不以 fake 结果替代实网结论。
 

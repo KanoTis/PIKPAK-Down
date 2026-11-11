@@ -5,15 +5,14 @@ import time
 
 import httpx
 import pytest
-
 from fake_pikpak_server import (
     FLD_FILE,
+    FLD_FOLDER,
+    FLD_SHARE,
     GRAPH_A_SHARE,
     GRAPH_B_SHARE,
     GRAPH_C_SHARE,
     GRAPH_D_SHARE,
-    FLD_FOLDER,
-    FLD_SHARE,
     PUB_SHARE,
     REF_SHARES,
 )
@@ -221,6 +220,7 @@ async def test_graph_bfs_dedupes_shares_and_aggregates_edges(env, fake_server) -
         report = await build_report(session, run)
         detail_d = await build_share_detail(session, run, GRAPH_D_SHARE)
         detail_a = await build_share_detail(session, run, GRAPH_A_SHARE)
+        detail_b = await build_share_detail(session, run, GRAPH_B_SHARE)
 
     graph = report["graph"]
     assert graph["start"] == f"share:{GRAPH_A_SHARE}"
@@ -250,6 +250,7 @@ async def test_graph_bfs_dedupes_shares_and_aggregates_edges(env, fake_server) -
     }
     assert detail_d["content"]["total"] == 1
     assert detail_a["content"]["total"] == 4
+    assert detail_b["content"]["total"] == 1
 
 
 @pytest.mark.asyncio
@@ -334,6 +335,7 @@ async def test_truncated_graph_marks_pending_as_budget(env, fake_server) -> None
 async def test_graph_selection_limits_start_share(env, fake_server) -> None:
     from app.db import get_session_factory
     from app.services.lineage import build_report
+    from app.services.lineage_graph import build_share_detail
 
     run_id = await create_lineage(
         input_value=f"https://mypikpak.com/s/{GRAPH_A_SHARE}",
@@ -354,10 +356,12 @@ async def test_graph_selection_limits_start_share(env, fake_server) -> None:
     factory = get_session_factory()
     async with factory() as session:
         report = await build_report(session, run)
+        detail_b = await build_share_detail(session, run, GRAPH_B_SHARE)
 
     graph = report["graph"]
     nodes = {node["share_id"]: node for node in graph["nodes"]}
     assert set(nodes) == {GRAPH_A_SHARE, GRAPH_B_SHARE, GRAPH_D_SHARE}
+    assert detail_b["content"]["total"] == 1
     assert nodes[GRAPH_A_SHARE]["file_count"] == 1
     edges = {(edge["from_share_id"], edge["to_share_id"]) for edge in graph["edges"]}
     assert edges == {

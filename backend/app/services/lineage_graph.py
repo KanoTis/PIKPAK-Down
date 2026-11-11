@@ -192,6 +192,7 @@ async def _store_item(
     node: FileNode,
     *,
     path: str,
+    traced: bool = False,
 ) -> LineageGraphItem | None:
     existing = (
         await session.execute(
@@ -211,6 +212,8 @@ async def _store_item(
             existing.hash = node.hash
         if path and not existing.path:
             existing.path = path
+        if traced:
+            existing.traced = True
         return existing
     settings = get_settings()
     if run.items_enumerated >= settings.lineage_max_items:
@@ -231,6 +234,7 @@ async def _store_item(
         is_video=node.is_video,
         original_share_id=node.original_share_id or None,
         original_file_id=node.original_file_id or None,
+        traced=traced,
         depth=share.depth,
     )
     session.add(row)
@@ -293,6 +297,8 @@ async def _handle_origin_refs(
     share: LineageGraphShare,
     item: LineageGraphItem,
 ) -> None:
+    if not item.traced:
+        return
     origin = (item.original_share_id or "").strip()
     if not origin or origin == share.share_id:
         return
@@ -390,7 +396,7 @@ async def _seed_selected_items(
             node.parent_id = info.parent_id
             node.size = info.size or node.size
             node.params = info.params
-        stored = await _store_item(session, run, share, node, path=path)
+        stored = await _store_item(session, run, share, node, path=path, traced=True)
         if stored is None:
             break
         if kind == "drive#folder":
@@ -403,12 +409,7 @@ async def _seed_selected_items(
     await session.flush()
 
 
-async def _seed_share(
-    session: AsyncSession,
-    run: LineageRun,
-    share: LineageGraphShare,
-    snapshot: Any,
-) -> None:
+def _apply_share_snapshot(share: LineageGraphShare, snapshot: Any) -> None:
     share.share_status = snapshot.share_status
     share.share_status_text = snapshot.share_status_text
     share.title = snapshot.title
@@ -417,16 +418,27 @@ async def _seed_share(
     share.anonymous_play_seconds = snapshot.anonymous_play_seconds
     share.raw_json = json.dumps(sanitize(snapshot.raw), ensure_ascii=False, default=str)
     root = snapshot.files[0] if snapshot.files else None
+    if root is not None:
+        share.root_kind = root.kind
+        share.root_file_id = root.id
+        share.root_name = root.name
+
+
+async def _seed_share(
+    session: AsyncSession,
+    run: LineageRun,
+    share: LineageGraphShare,
+    snapshot: Any,
+) -> None:
+    _apply_share_snapshot(share, snapshot)
+    root = snapshot.files[0] if snapshot.files else None
     if root is None:
         share.state = SHARE_STATE_DONE
         await session.flush()
         return
     root.share_id = share.share_id
-    share.root_kind = root.kind
-    share.root_file_id = root.id
-    share.root_name = root.name
     path = root.name or ""
-    stored = await _store_item(session, run, share, root, path=path)
+    stored = await _store_item(session, run, share, root, path=path, traced=True)
     if stored is not None:
         await _handle_origin_refs(session, run, share, stored)
     if root.is_folder:
@@ -477,11 +489,78 @@ async def _process_share_row(
         share.state = SHARE_STATE_DONE
         await session.flush()
         return
-    selections = _graph_selections(run) if share.role == "start" else []
+    _apply_share_snapshot(share, snapshot)
+    if share.role != "start":
+        await _resolve_trace_refs(session, run, client, share, snapshot)
+        return
+    selections = _graph_selections(run)
     if selections:
         await _seed_selected_items(session, run, client, share, snapshot, selections)
     else:
         await _seed_share(session, run, share, snapshot)
+    await session.flush()
+
+
+async def _resolve_trace_refs(
+    session: AsyncSession,
+    run: LineageRun,
+    client: AnonymousPikPakClient,
+    share: LineageGraphShare,
+    snapshot: Any,
+) -> None:
+    refs = (
+        await session.execute(
+            select(
+                LineageGraphItem.original_file_id,
+                LineageGraphItem.name,
+            ).where(
+                LineageGraphItem.run_id == run.id,
+                LineageGraphItem.original_share_id == share.share_id,
+                LineageGraphItem.traced.is_(True),
+                LineageGraphItem.original_file_id.is_not(None),
+                LineageGraphItem.original_file_id != "",
+            )
+        )
+    ).all()
+    seen: set[str] = set()
+    token = snapshot.pass_code_token or ""
+    for file_id, name in refs:
+        file_id = str(file_id or "")
+        if not file_id or file_id in seen:
+            continue
+        seen.add(file_id)
+        if not await _consume_request(session, run):
+            share.state = SHARE_STATE_BUDGET
+            await session.flush()
+            return
+        try:
+            node = await client.file_info(share.share_id, file_id, token)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "lineage_trace_file_failed",
+                run_id=run.id,
+                share_id=share.share_id,
+                file_id=file_id,
+                error=str(exc),
+            )
+            share.error_code = getattr(exc, "code", "TRACE_FILE_NOT_FOUND")
+            share.error_message = str(exc)
+            continue
+        node.share_id = share.share_id
+        stored = await _store_item(
+            session,
+            run,
+            share,
+            node,
+            path=node.name or str(name or file_id),
+            traced=True,
+        )
+        if stored is None:
+            share.state = SHARE_STATE_BUDGET
+            await session.flush()
+            return
+        await _handle_origin_refs(session, run, share, stored)
+    share.state = SHARE_STATE_DONE
     await session.flush()
 
 
@@ -527,7 +606,7 @@ async def _process_folder_row(
     folder.state = FOLDER_STATE_ENUMERATING
     await session.flush()
     share = await _get_share_row(session, run, folder.share_id)
-    if share is None:
+    if share is None or share.role != "start":
         folder.state = FOLDER_STATE_DONE
         return
     snap_row = (
@@ -564,7 +643,7 @@ async def _process_folder_row(
     for node in page.files:
         node.share_id = folder.share_id
         path = _join_path(folder.path, node.name)
-        stored = await _store_item(session, run, share, node, path=path)
+        stored = await _store_item(session, run, share, node, path=path, traced=True)
         if stored is None:
             break
         if node.is_folder:
