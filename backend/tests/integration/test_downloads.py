@@ -107,13 +107,18 @@ async def run_until(job_id: str, predicate, timeout: float = 40.0):
     raise AssertionError(f"job {job_id} did not reach expected state in time")
 
 
-async def create_job(url: str):
+async def create_job(url: str, target_subdir: str | None = None):
     from app.db import get_session_factory
     from app.services.download import create_job as create
 
     factory = get_session_factory()
     async with factory() as session:
-        job = await create(session, input_url=url, pass_code=None)
+        job = await create(
+            session,
+            input_url=url,
+            pass_code=None,
+            target_subdir=target_subdir,
+        )
         await session.commit()
         return job.id
 
@@ -614,3 +619,21 @@ async def test_job_and_file_category_filters(env, fake_server) -> None:
             f"/api/download-jobs/{job_id}/files", params={"category": "downloading"}
         )
         assert downloading.json()["items"] == []
+
+
+@pytest.mark.asyncio
+async def test_duplicate_content_reuses_local_file(env, fake_server) -> None:
+    first_id = await create_job(f"https://mypikpak.com/s/{ANON_SHARE}", "dup-a")
+    await run_until(first_id, lambda job, tasks: job.status == "COMPLETED")
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        before = (await client.get(f"{fake_server}/__state")).json()["cdn_requests"]
+    second_id = await create_job(f"https://mypikpak.com/s/{ANON_SHARE}", "dup-b")
+    job, tasks = await run_until(second_id, lambda job, tasks: job.status == "COMPLETED")
+    task = tasks[0]
+    assert task.route == "local"
+    assert task.target_path == "dup-b/anon.bin"
+    assert (env.downloads_dir / task.target_path).stat().st_size == task.size
+    async with httpx.AsyncClient(timeout=10) as client:
+        after = (await client.get(f"{fake_server}/__state")).json()["cdn_requests"]
+    assert len(after) == len(before)

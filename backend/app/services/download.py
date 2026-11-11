@@ -874,6 +874,100 @@ async def _dispatch_plans(session: AsyncSession) -> None:
         await client.close()
 
 
+
+async def _try_local_reuse(
+    session: AsyncSession, job: DownloadJob, task: DownloadTask
+) -> bool:
+    """Reuse a local target or another completed task with the same content."""
+    if not task.expected_hash or task.size < 0:
+        return False
+    relative = task.target_path or _join_relative(job.target_subdir, task.relative_path)
+    try:
+        target = _download_path(relative)
+    except ValueError:
+        return False
+
+    if target.is_file() and target.stat().st_size == task.size:
+        result = await asyncio.to_thread(
+            verify_file, target, task.size, task.expected_hash
+        )
+        if result.ok:
+            task.target_path = _download_relative(target)
+            task.bytes_done = task.size
+            task.verified_chunk = result.chunk
+            task.route = "local"
+            task.source_url_enc = None
+            task.error_code = None
+            task.error_message = None
+            _set_status(task, TaskStatus.DONE)
+            task.finished_at = utcnow()
+            events.emit(
+                session,
+                "download_task",
+                task.id,
+                "download_task.reused_target",
+                {"hash": task.expected_hash, "size": task.size},
+            )
+            await _refresh_job(session, job)
+            await session.commit()
+            return True
+
+    if target.exists():
+        return False
+
+    source = (
+        await session.execute(
+            select(DownloadTask)
+            .where(
+                DownloadTask.id != task.id,
+                DownloadTask.status == TaskStatus.DONE,
+                DownloadTask.expected_hash == task.expected_hash,
+                DownloadTask.size == task.size,
+                DownloadTask.target_path.is_not(None),
+            )
+            .order_by(DownloadTask.finished_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if source is None or not source.target_path:
+        return False
+    try:
+        source_path = _download_path(source.target_path)
+    except ValueError:
+        return False
+    if not source_path.is_file() or source_path.stat().st_size != task.size:
+        return False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        await asyncio.to_thread(os.link, source_path, target)
+    except OSError:
+        await asyncio.to_thread(shutil.copyfile, source_path, target)
+    task.target_path = _download_relative(target)
+    task.bytes_done = task.size
+    task.verified_chunk = source.verified_chunk
+    task.route = "local"
+    task.source_url_enc = None
+    task.error_code = None
+    task.error_message = None
+    _set_status(task, TaskStatus.DONE)
+    task.finished_at = utcnow()
+    events.emit(
+        session,
+        "download_task",
+        task.id,
+        "download_task.local_copy",
+        {
+            "hash": task.expected_hash,
+            "size": task.size,
+            "source_task_id": source.id,
+        },
+    )
+    await _refresh_job(session, job)
+    await session.commit()
+    return True
+
+
 async def _plan_task(
     session: AsyncSession, task: DownloadTask, client: AnonymousPikPakClient
 ) -> None:
@@ -883,6 +977,9 @@ async def _plan_task(
     _set_status(task, TaskStatus.PLANNING)
     task.attempts += 1
     await session.commit()
+
+    if await _try_local_reuse(session, job, task):
+        return
 
     token = decrypt(job.pass_code_token_enc)
     try:
