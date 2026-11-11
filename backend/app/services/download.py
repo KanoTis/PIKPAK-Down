@@ -54,7 +54,7 @@ from .accounts import (
 from .cleanup import enqueue_cleanup
 from .planner import DownloadPlan, anonymous_plan
 from .verifier import extract_tar_member, verify_file
-from .windows import probe_tail_exact, probe_three_points, probe_with_retries
+from .windows import probe_tail_exact, probe_with_retries
 
 log = structlog.get_logger(__name__)
 
@@ -1361,17 +1361,6 @@ async def run_account_handoff(session: AsyncSession, task_id: str) -> None:
         await client.close()
 
 
-async def _tar_multipart_allowed(url: str, size: int) -> bool:
-    if size <= 0:
-        return False
-    try:
-        return await probe_three_points(
-            url, size, limiter=await window_limiter()
-        )
-    except Exception:  # noqa: BLE001
-        return False
-
-
 async def _handoff_via_tar(
     session: AsyncSession,
     job: DownloadJob,
@@ -1463,14 +1452,7 @@ async def _handoff_via_tar(
     await release_account(session, account.id, task.id)
     await session.commit()
 
-    multipart = await _tar_multipart_allowed(wcl, tar_size)
-    events.emit(
-        session,
-        "download_task",
-        task.id,
-        "download_task.tar_multipart_checked",
-        {"multipart": multipart, "size": tar_size},
-    )
+    # tar is downloaded as one stream: no multipart/range splitting.
     try:
         await _start_aria2(
             session,
@@ -1478,7 +1460,7 @@ async def _handoff_via_tar(
             wcl,
             TaskStatus.ACCOUNT_DOWNLOADING,
             size=tar_size,
-            single_connection=not multipart,
+            single_connection=True,
         )
     except PikPakError as exc:
         task.error_code = exc.code or "ARIA2_UNAVAILABLE"
@@ -1526,11 +1508,6 @@ async def _handoff_with_account(
                     _set_status(task, TaskStatus.ACCOUNT_QUEUED)
                 await session.commit()
                 return
-            multipart = (
-                await _tar_multipart_allowed(wcl, expected_size)
-                if task.route == "tar"
-                else False
-            )
             try:
                 await _start_aria2(
                     session,
@@ -1538,7 +1515,7 @@ async def _handoff_with_account(
                     wcl,
                     TaskStatus.ACCOUNT_DOWNLOADING,
                     size=expected_size,
-                    single_connection=not multipart,
+                    single_connection=task.route == "tar",
                 )
             except PikPakError as exc:
                 task.error_code = exc.code or "ARIA2_UNAVAILABLE"
@@ -1975,6 +1952,89 @@ async def _handle_download_failure(
     await session.commit()
 
 
+async def _prepare_download_target(
+    target: Path, task: DownloadTask
+) -> tuple[Path, str | None, object | None]:
+    """Resolve an existing target before writing; returns (path, action, verify_result)."""
+    settings = get_settings()
+    if target.is_file():
+        if target.stat().st_size == task.size:
+            existing = await asyncio.to_thread(
+                verify_file, target, task.size, task.expected_hash
+            )
+            if existing.ok:
+                return target, "reuse", existing
+        policy = settings.duplicate_name_policy
+        if policy == "skip":
+            return target, "skip", None
+        if policy == "overwrite":
+            target.unlink(missing_ok=True)
+            return target, None, None
+        return _unique_target(target), None, None
+    return target, None, None
+
+
+async def _mark_task_done(
+    session: AsyncSession,
+    job: DownloadJob,
+    task: DownloadTask,
+    target: Path,
+    result,
+) -> None:
+    task.target_path = _download_relative(target)
+    task.object_id = None
+    task.bytes_done = task.size
+    task.verified_chunk = result.chunk
+    task.speed = 0
+    task.source_url_enc = None
+    task.error_code = None
+    task.error_message = None
+    _set_status(task, TaskStatus.DONE)
+    task.finished_at = utcnow()
+    events.emit(
+        session,
+        "download_task",
+        task.id,
+        "download_task.done",
+        {
+            "hash": task.expected_hash,
+            "size": task.size,
+            "chunk": result.chunk,
+            "target_path": task.target_path,
+        },
+    )
+    await _refresh_job(session, job)
+    await session.commit()
+
+
+async def _mark_duplicate_skipped(
+    session: AsyncSession,
+    job: DownloadJob,
+    task: DownloadTask,
+    target: Path,
+    chunk: int | None,
+) -> None:
+    task.target_path = _download_relative(target)
+    task.object_id = None
+    task.bytes_done = 0
+    task.verified_chunk = chunk
+    task.speed = 0
+    task.source_url_enc = None
+    task.error_code = "DUPLICATE_SKIPPED"
+    task.error_message = "同名文件已存在且内容不同，按设置跳过"
+    _set_status(task, TaskStatus.DONE)
+    task.finished_at = utcnow()
+    events.emit(
+        session,
+        "download_task",
+        task.id,
+        "download_task.duplicate_skipped",
+        {"target_path": task.target_path},
+    )
+    await _refresh_job(session, job)
+    await session.commit()
+
+
 async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTask) -> None:
     if not task.expected_hash:
         _set_status(task, TaskStatus.FAILED)
@@ -1986,31 +2046,65 @@ async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTa
     settings = get_settings()
     temp = settings.cache_dir / task.id / "download.bin"
     if task.route == "tar":
-        if not task.tar_size or not temp.is_file() or temp.stat().st_size != task.tar_size:
-            result = None
-        else:
-            extracted = settings.cache_dir / task.id / "extracted.bin"
+        result = None
+        if task.tar_size and temp.is_file() and temp.stat().st_size == task.tar_size:
+            relative = task.target_path or _join_relative(
+                job.target_subdir, task.relative_path
+            )
+            target = _download_path(relative)
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            target, action, existing = await _prepare_download_target(target, task)
+            if action == "reuse" and existing is not None:
+                temp.unlink(missing_ok=True)
+                shutil.rmtree(settings.cache_dir / task.id, ignore_errors=True)
+                await _mark_task_done(session, job, task, target, existing)
+                return
+            if action == "skip":
+                temp.unlink(missing_ok=True)
+                shutil.rmtree(settings.cache_dir / task.id, ignore_errors=True)
+                await _mark_duplicate_skipped(session, job, task, target, None)
+                return
+
+            partial = target.parent / f".{task.id}.part"
+            partial.unlink(missing_ok=True)
             extracted_ok = await asyncio.to_thread(
                 extract_tar_member,
                 temp,
-                extracted,
+                partial,
                 expected_size=task.size,
                 expected_name=task.name,
             )
-            result = (
-                await asyncio.to_thread(
-                    verify_file, extracted, task.size, task.expected_hash
+            if extracted_ok:
+                result = await asyncio.to_thread(
+                    verify_file, partial, task.size, task.expected_hash
                 )
-                if extracted_ok
-                else None
-            )
             if result is not None and result.ok:
-                temp = extracted
+                target, action, existing = await _prepare_download_target(
+                    target, task
+                )
+                if action == "reuse" and existing is not None:
+                    partial.unlink(missing_ok=True)
+                    shutil.rmtree(settings.cache_dir / task.id, ignore_errors=True)
+                    await _mark_task_done(session, job, task, target, existing)
+                    return
+                if action == "skip":
+                    partial.unlink(missing_ok=True)
+                    shutil.rmtree(settings.cache_dir / task.id, ignore_errors=True)
+                    await _mark_duplicate_skipped(
+                        session, job, task, target, result.chunk
+                    )
+                    return
+                os.replace(partial, target)
+                shutil.rmtree(settings.cache_dir / task.id, ignore_errors=True)
+                await _mark_task_done(session, job, task, target, result)
+                return
+            partial.unlink(missing_ok=True)
     else:
         result = await asyncio.to_thread(
             verify_file, temp, task.size, task.expected_hash
         )
-    if result is not None and result.ok:
+    if task.route != "tar" and result is not None and result.ok:
         settings = get_settings()
         relative = task.target_path or _join_relative(
             job.target_subdir, task.relative_path
@@ -2299,6 +2393,18 @@ async def delete_job(session: AsyncSession, job_id: str) -> str:
     object_ids = sorted({task.object_id for task in tasks if task.object_id})
     target_paths = sorted({task.target_path for task in tasks if task.target_path})
     settings = get_settings()
+
+    for task in tasks:
+        relative = task.target_path or _join_relative(
+            job.target_subdir, task.relative_path
+        )
+        if not relative:
+            continue
+        try:
+            partial = _download_path(relative).parent / f".{task.id}.part"
+        except ValueError:
+            continue
+        partial.unlink(missing_ok=True)
 
     for relative in target_paths:
         shared = (

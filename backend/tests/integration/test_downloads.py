@@ -791,13 +791,9 @@ async def test_tar_fallback_packs_and_starts_single_connection(env, fake_server,
         task.status = TaskStatus.ACCOUNT_DOWNLOADING
         await session.commit()
 
-    async def fake_probe(url, size):
-        return False
-
     monkeypatch.setattr(download, "_delete_drive_file", fake_delete)
     monkeypatch.setattr(download, "release_account", fake_release)
     monkeypatch.setattr(download, "_start_aria2", fake_start)
-    monkeypatch.setattr(download, "_tar_multipart_allowed", fake_probe)
 
     factory = get_session_factory()
     async with factory() as session:
@@ -988,4 +984,57 @@ async def test_tar_route_extracts_and_verifies(env, fake_server) -> None:
         await download._verify_task(session, job, task)
         await session.refresh(task)
         assert task.status == TaskStatus.DONE
-        assert (Path(env.downloads_dir) / "tar-verify/video.bin").read_bytes() == payload
+        target_path = Path(env.downloads_dir) / "tar-verify/video.bin"
+        assert target_path.read_bytes() == payload
+
+        target_path.write_bytes(b"old-different")
+        env.duplicate_name_policy = "skip"
+        skipped = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARVERIFYFILE0002",
+            name="video.bin",
+            relative_path="video.bin",
+            target_path="tar-verify/video.bin",
+            size=len(payload),
+            expected_hash=hash_value,
+            status=TaskStatus.VERIFYING,
+            route="tar",
+            tar_size=archive.stat().st_size,
+        )
+        session.add(skipped)
+        await session.commit()
+        cache_dir = Path(env.cache_dir) / skipped.id
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "download.bin").write_bytes(archive.read_bytes())
+        await download._verify_task(session, job, skipped)
+        await session.refresh(skipped)
+        assert skipped.status == TaskStatus.DONE
+        assert skipped.error_code == "DUPLICATE_SKIPPED"
+        assert target_path.read_bytes() == b"old-different"
+        assert not (cache_dir / "extracted.bin").exists()
+        assert not list(target_path.parent.glob(f".{skipped.id}.part"))
+
+        env.duplicate_name_policy = "rename"
+        renamed = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARVERIFYFILE0003",
+            name="video.bin",
+            relative_path="video.bin",
+            target_path="tar-verify/video.bin",
+            size=len(payload),
+            expected_hash=hash_value,
+            status=TaskStatus.VERIFYING,
+            route="tar",
+            tar_size=archive.stat().st_size,
+        )
+        session.add(renamed)
+        await session.commit()
+        cache_dir = Path(env.cache_dir) / renamed.id
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        (cache_dir / "download.bin").write_bytes(archive.read_bytes())
+        await download._verify_task(session, job, renamed)
+        await session.refresh(renamed)
+        assert renamed.status == TaskStatus.DONE
+        assert target_path.read_bytes() == b"old-different"
+        assert (target_path.parent / "video (1).bin").read_bytes() == payload
+        assert not list(target_path.parent.glob(f".{renamed.id}.part"))

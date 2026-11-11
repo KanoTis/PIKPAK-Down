@@ -5,7 +5,7 @@ description = "PikPak share downloader and lineage tracing web app"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.135,<1",
-    "uvicorn[standard]>=0.34",
+    "uvicorn>=0.34",
     "sqlalchemy[asyncio]>=2.0.36",
     "aiosqlite>=0.20",
     "alembic>=1.14",
