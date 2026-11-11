@@ -931,6 +931,106 @@ async def test_retry_job_requeues_failed_tasks(env, fake_server) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+
+    class FakeCleanupClient:
+        def __init__(self, folders: list[dict]) -> None:
+            self.folders = folders
+            self.deleted: list[str] = []
+
+        async def list_files(self, parent_id, page_token=None):
+            return {"files": list(self.folders), "next_page_token": ""}
+
+        async def delete_file(self, file_id: str) -> int:
+            self.deleted.append(file_id)
+            self.folders = [item for item in self.folders if item["id"] != file_id]
+            return 200
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/TARCLEAN00000001",
+            share_id="TARCLEAN00000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        done = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARCLEANFILE0001",
+            name="done.mp4",
+            relative_path="done.mp4",
+            size=1,
+            expected_hash="HASH",
+            status=TaskStatus.DONE,
+            route="tar",
+            tar_folder_id="TARFOLDERDONE001",
+        )
+        active = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARCLEANFILE0002",
+            name="active.mp4",
+            relative_path="active.mp4",
+            size=1,
+            expected_hash="HASH",
+            status=TaskStatus.ACCOUNT_DOWNLOADING,
+            route="tar",
+            tar_folder_id="TARFOLDERACTIVE1",
+        )
+        queued = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARCLEANFILE0003",
+            name="queued.mp4",
+            relative_path="queued.mp4",
+            size=1,
+            expected_hash="HASH",
+            status=TaskStatus.ACCOUNT_QUEUED,
+            route="tar",
+            tar_folder_id="TARFOLDERQUEUED1",
+            drive_file_id="TARSOURCEEXIST01",
+            restore_task_id="TASHEXIST0000001",
+            tar_size=99,
+        )
+        session.add_all([done, active, queued])
+        await session.commit()
+        folders = [
+            {
+                "id": "TARFOLDERDONE001",
+                "kind": "drive#folder",
+                "name": f"pikpak_tar_{done.id[:8]}",
+            },
+            {
+                "id": "TARFOLDERACTIVE1",
+                "kind": "drive#folder",
+                "name": f"pikpak_tar_{active.id[:8]}",
+            },
+            {
+                "id": "TARFOLDERQUEUED1",
+                "kind": "drive#folder",
+                "name": f"pikpak_tar_{queued.id[:8]}",
+            },
+            {"id": "OTHERFOLDER00001", "kind": "drive#folder", "name": "not-ours"},
+        ]
+        client = FakeCleanupClient(folders)
+        removed = await download._cleanup_stale_tar_folders(session, client)
+        await session.refresh(done)
+        await session.refresh(active)
+        await session.refresh(queued)
+
+    assert removed == 2
+    assert client.deleted == ["TARFOLDERDONE001", "TARFOLDERQUEUED1"]
+    assert done.tar_folder_id is None
+    assert active.tar_folder_id == "TARFOLDERACTIVE1"
+    assert queued.tar_folder_id is None
+    assert queued.drive_file_id is None
+    assert queued.restore_task_id is None
+    assert queued.tar_size == 0
+
+
+@pytest.mark.asyncio
 async def test_tar_route_extracts_and_verifies(env, fake_server) -> None:
     import io
     import tarfile

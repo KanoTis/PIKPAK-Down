@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
@@ -154,20 +154,46 @@ async def import_account(
 
 async def reset_daily_counters(session: AsyncSession) -> None:
     today = local_today()
+    pending = (
+        await session.execute(
+            select(Account.id)
+            .where(
+                or_(
+                    Account.daily_date.is_(None),
+                    Account.daily_date != today,
+                )
+            )
+            .limit(1)
+        )
+    ).first()
+    if pending is None:
+        return
     await session.execute(
         update(Account)
-        .where(Account.daily_date != today)
-        .values(daily_date=today, daily_restore_count=0)
-    )
-    await session.execute(
-        update(Account)
-        .where(Account.daily_date.is_(None))
+        .where(
+            or_(
+                Account.daily_date.is_(None),
+                Account.daily_date != today,
+            )
+        )
         .values(daily_date=today, daily_restore_count=0)
     )
 
 
 async def recover_cooldowns(session: AsyncSession) -> None:
     now = utcnow()
+    pending = (
+        await session.execute(
+            select(Account.id)
+            .where(
+                Account.state == AccountState.COOLDOWN,
+                Account.cooldown_until <= now,
+            )
+            .limit(1)
+        )
+    ).first()
+    if pending is None:
+        return
     await session.execute(
         update(Account)
         .where(Account.state == AccountState.COOLDOWN, Account.cooldown_until <= now)

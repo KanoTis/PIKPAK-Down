@@ -1532,6 +1532,16 @@ async def _handoff_with_account(
     await client.ensure_access_token()
     about = await client.about()
     await update_quota_from_about(account, about)
+    # Release the write transaction before any network work or folder cleanup.
+    await session.commit()
+    if not quota_available(account, task.size):
+        removed = await _cleanup_stale_tar_folders(
+            session, client, exclude_task_id=task.id
+        )
+        if removed:
+            about = await client.about()
+            await update_quota_from_about(account, about)
+            await session.commit()
     if not quota_available(account, task.size):
         await release_account(session, account.id, task.id)
         task.queue_reason = "NO_QUOTA"
@@ -1764,6 +1774,119 @@ async def _find_in_folder(client, folder_id: str, task: DownloadTask) -> str | N
             retryable=False,
         )
     return None
+
+
+TAR_FOLDER_PREFIX = "pikpak_tar_"
+_ACTIVE_TAR_STATES = {
+    TaskStatus.PLANNING,
+    TaskStatus.ANON_DOWNLOADING,
+    TaskStatus.RESTORING,
+    TaskStatus.WCL_READY,
+    TaskStatus.ACCOUNT_DOWNLOADING,
+    TaskStatus.VERIFYING,
+    TaskStatus.PAUSED,
+}
+
+
+def _reset_tar_task(task: DownloadTask) -> None:
+    task.drive_file_id = None
+    task.restore_task_id = None
+    task.restore_folder_id = None
+    task.restore_started_at = None
+    task.remote_deleted_at = None
+    task.source_url_enc = None
+    task.source_url_expire = None
+    task.tar_size = 0
+    task.tar_folder_id = None
+    task.error_code = None
+    task.error_message = None
+    task.queue_reason = "NO_QUOTA"
+
+
+async def _cleanup_stale_tar_folders(
+    session: AsyncSession,
+    client,
+    *,
+    exclude_task_id: str | None = None,
+) -> int:
+    """Delete app-created tar folders that no running task still needs."""
+    removed = 0
+    page_token: str | None = None
+    for _ in range(50):
+        try:
+            data = await client.list_files("", page_token)
+        except PikPakError as exc:
+            log.warning("tar_folder_list_failed", error=str(exc))
+            break
+        for item in data.get("files") or []:
+            node = FileNode.from_json(item)
+            if not node.is_folder or not node.name.startswith(TAR_FOLDER_PREFIX):
+                continue
+            suffix = node.name[len(TAR_FOLDER_PREFIX) :]
+            if not suffix:
+                continue
+            tasks = (
+                await session.execute(
+                    select(DownloadTask).where(DownloadTask.id.like(f"{suffix}%"))
+                )
+            ).scalars().all()
+            if exclude_task_id and any(task.id == exclude_task_id for task in tasks):
+                continue
+            if any(task.status in _ACTIVE_TAR_STATES for task in tasks):
+                continue
+            try:
+                await client.delete_file(node.id)
+            except NotFound:
+                pass
+            except PikPakError as exc:
+                log.warning(
+                    "tar_folder_delete_failed",
+                    folder_id=node.id,
+                    error=str(exc),
+                )
+                continue
+            for task in tasks:
+                if task.tar_folder_id == node.id:
+                    if task.status == TaskStatus.ACCOUNT_QUEUED:
+                        _reset_tar_task(task)
+                    else:
+                        task.tar_folder_id = None
+            removed += 1
+        page_token = data.get("next_page_token") or None
+        if not page_token:
+            break
+    if removed:
+        await session.commit()
+        log.info("stale_tar_folders_removed", count=removed)
+    return removed
+
+
+async def _delete_tar_folder(session: AsyncSession, task: DownloadTask) -> None:
+    folder_id = task.tar_folder_id
+    if not folder_id or not task.account_id:
+        return
+    account = await session.get(Account, task.account_id)
+    if account is None:
+        return
+    client = make_client(account)
+    try:
+        await client.delete_file(folder_id)
+        task.tar_folder_id = None
+        await session.commit()
+    except NotFound:
+        task.tar_folder_id = None
+        await session.commit()
+    except (PikPakError, Unauthorized) as exc:
+        await enqueue_cleanup(
+            session,
+            account_id=account.id,
+            drive_file_id=folder_id,
+            task_id=task.id,
+            error=str(exc),
+        )
+        await session.commit()
+    finally:
+        await client.close()
 
 
 async def _delete_drive_file(
@@ -2005,6 +2128,8 @@ async def _mark_task_done(
     )
     await _refresh_job(session, job)
     await session.commit()
+    if task.route == "tar" and task.tar_folder_id:
+        await _delete_tar_folder(session, task)
 
 
 async def _mark_duplicate_skipped(
@@ -2033,6 +2158,8 @@ async def _mark_duplicate_skipped(
     )
     await _refresh_job(session, job)
     await session.commit()
+    if task.route == "tar" and task.tar_folder_id:
+        await _delete_tar_folder(session, task)
 
 
 async def _verify_task(session: AsyncSession, job: DownloadJob, task: DownloadTask) -> None:

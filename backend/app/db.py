@@ -15,14 +15,24 @@ def get_engine():
     global _engine
     if _engine is None:
         settings = get_settings()
-        _engine = create_async_engine(settings.database_url, future=True, pool_pre_ping=True)
+        connect_args = (
+            {"timeout": 30}
+            if settings.database_url.startswith("sqlite")
+            else {}
+        )
+        _engine = create_async_engine(
+            settings.database_url,
+            future=True,
+            pool_pre_ping=True,
+            connect_args=connect_args,
+        )
 
         @event.listens_for(_engine.sync_engine, "connect")
         def _set_pragmas(dbapi_connection, _record):  # type: ignore[no-untyped-def]
             cursor = dbapi_connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA busy_timeout=30000")
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.close()
 
