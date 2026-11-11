@@ -637,3 +637,46 @@ async def test_duplicate_content_reuses_local_file(env, fake_server) -> None:
     async with httpx.AsyncClient(timeout=10) as client:
         after = (await client.get(f"{fake_server}/__state")).json()["cdn_requests"]
     assert len(after) == len(before)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_content_does_not_download_twice(env, fake_server) -> None:
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask
+    from sqlalchemy import select
+
+    first_id = await create_job(f"https://mypikpak.com/s/{ANON_SHARE}", "dup-c")
+    second_id = await create_job(f"https://mypikpak.com/s/{ANON_SHARE}", "dup-d")
+
+    factory = get_session_factory()
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        await _tick()
+        async with factory() as session:
+            jobs = (
+                await session.execute(
+                    select(DownloadJob).where(DownloadJob.id.in_([first_id, second_id]))
+                )
+            ).scalars().all()
+            if all(job.status == "COMPLETED" for job in jobs):
+                break
+        await asyncio.sleep(0.1)
+    else:
+        raise AssertionError("duplicate jobs did not complete")
+
+    async with factory() as session:
+        tasks = (
+            await session.execute(
+                select(DownloadTask).where(
+                    DownloadTask.job_id.in_([first_id, second_id])
+                )
+            )
+        ).scalars().all()
+    assert len(tasks) == 2
+    assert {task.route for task in tasks} == {"anonymous", "local"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        state = (await client.get(f"{fake_server}/__state")).json()
+    aria2_requests = [
+        item for item in state["cdn_requests"] if "aria2" in item["ua"].lower()
+    ]
+    assert len(aria2_requests) == 1

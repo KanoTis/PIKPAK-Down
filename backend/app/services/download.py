@@ -915,6 +915,35 @@ async def _try_local_reuse(
     if target.exists():
         return False
 
+    active_copy = (
+        await session.execute(
+            select(DownloadTask.id)
+            .where(
+                DownloadTask.id != task.id,
+                DownloadTask.expected_hash == task.expected_hash,
+                DownloadTask.size == task.size,
+                DownloadTask.status.in_(
+                    [
+                        TaskStatus.PLANNING,
+                        TaskStatus.ANON_DOWNLOADING,
+                        TaskStatus.ACCOUNT_DOWNLOADING,
+                        TaskStatus.ACCOUNT_QUEUED,
+                        TaskStatus.RESTORING,
+                        TaskStatus.WCL_READY,
+                        TaskStatus.VERIFYING,
+                    ]
+                ),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if active_copy is not None:
+        task.queue_reason = "DUPLICATE_WAITING"
+        if task.status != TaskStatus.DISCOVERED:
+            _set_status(task, TaskStatus.DISCOVERED)
+        await session.commit()
+        return True
+
     source = (
         await session.execute(
             select(DownloadTask)
@@ -974,12 +1003,13 @@ async def _plan_task(
     job = await session.get(DownloadJob, task.job_id)
     if job is None:
         return
-    _set_status(task, TaskStatus.PLANNING)
-    task.attempts += 1
-    await session.commit()
 
     if await _try_local_reuse(session, job, task):
         return
+
+    _set_status(task, TaskStatus.PLANNING)
+    task.attempts += 1
+    await session.commit()
 
     token = decrypt(job.pass_code_token_enc)
     try:
