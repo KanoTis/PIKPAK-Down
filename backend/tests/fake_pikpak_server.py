@@ -62,6 +62,7 @@ TASK_ID = "RESTORETASK000001"
 STATE: dict[str, Any] = {
     "restore_calls": 0,
     "delete_calls": 0,
+    "trash_calls": 0,
     "delete_failures": 0,
     "events": [],
     "cdn_requests": [],
@@ -686,6 +687,7 @@ def create_app() -> FastAPI:
             {
                 "restore_calls": 0,
                 "delete_calls": 0,
+                "trash_calls": 0,
                 "delete_failures": 0,
                 "events": [],
                 "cdn_requests": [],
@@ -927,6 +929,18 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=404, content={"error": "file_not_found"})
         STATE["events"].append({"type": "fetch", "file_id": file_id, "t": time.time()})
         return data
+
+    @app.post("/drive/v1/files:batchTrash")
+    async def batch_trash(request: Request):
+        denied = _require_drive(request)
+        if denied:
+            return denied
+        body = await request.json()
+        ids = body.get("ids") or []
+        STATE["trash_calls"] += len(ids)
+        for file_id in ids:
+            STATE["events"].append({"type": "trash", "file_id": file_id, "t": time.time()})
+        return {"task_id": "TRASH0000000000001"}
 
     @app.post("/drive/v1/files:batchDelete")
     async def batch_delete(request: Request):

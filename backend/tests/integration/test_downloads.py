@@ -999,6 +999,9 @@ async def test_reconcile_account_files_deletes_tracked_terminal_files(env) -> No
                 "next_page_token": "",
             }
 
+        async def trash_files(self, file_ids: list[str]) -> int:
+            return 200
+
         async def delete_files(self, file_ids: list[str]) -> int:
             self.deleted.append(list(file_ids))
             return 200
@@ -1053,11 +1056,7 @@ async def test_reconcile_account_files_deletes_tracked_terminal_files(env) -> No
         "files_removed": 1,
         "failed": 0,
     }
-    assert client.deleted == [
-        ["RECONCILECHILD001"],
-        ["RECONCILEFOLDER001"],
-        ["RECONCILEFILE0002"],
-    ]
+    assert client.deleted == [["RECONCILEFOLDER001"], ["RECONCILEFILE0002"]]
     assert tasks[0].remote_deleted_at is not None
     assert tasks[1].remote_deleted_at is not None
 
@@ -1081,6 +1080,9 @@ async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
                 "files": list(self.children.get(parent_id, [])),
                 "next_page_token": "",
             }
+
+        async def trash_files(self, file_ids: list[str]) -> int:
+            return 200
 
         async def delete_files(self, file_ids: list[str]) -> int:
             for file_id in file_ids:

@@ -1823,37 +1823,39 @@ def _reset_tar_task(task: DownloadTask) -> None:
     task.queue_reason = "NO_QUOTA"
 
 
-async def _delete_folder_tree(
-    client,
-    folder_id: str,
-    *,
-    depth: int = 0,
-) -> int:
-    """Delete a folder and its contents; batchDelete alone is not recursive."""
-    if depth > 8 or not folder_id:
+async def _delete_remote_file(client, file_id: str) -> int:
+    if not file_id:
         return 0
-    files: list[str] = []
-    folders: list[str] = []
-    page_token: str | None = None
-    for _ in range(200):
-        try:
-            data = await client.list_files(folder_id, page_token)
-        except NotFound:
-            return 0
-        for item in data.get("files") or []:
-            node = FileNode.from_json(item)
-            if node.is_folder:
-                folders.append(node.id)
-            else:
-                files.append(node.id)
-        page_token = data.get("next_page_token") or None
-        if not page_token:
-            break
-    for child in folders:
-        await _delete_folder_tree(client, child, depth=depth + 1)
-    for index in range(0, len(files), 100):
-        await client.delete_files(files[index : index + 100])
-    await client.delete_file(folder_id)
+    try:
+        await client.trash_files([file_id])
+    except NotFound:
+        # It may already be in the trash; still try the permanent delete.
+        pass
+    try:
+        await client.delete_files([file_id])
+    except NotFound:
+        return 0
+    return 1
+
+
+async def _delete_folder_tree(client, folder_id: str) -> int:
+    """Move a folder subtree to trash, then delete it permanently.
+
+    PIKPAK's batchDelete on a live non-empty folder deletes the folder record
+    without reliably freeing the subtree's quota. batchTrash handles the whole
+    subtree; the subsequent batchDelete removes the trashed folder for real.
+    """
+    if not folder_id:
+        return 0
+    try:
+        await client.trash_files([folder_id])
+    except NotFound:
+        # Already trashed; still try the permanent delete.
+        pass
+    try:
+        await client.delete_files([folder_id])
+    except NotFound:
+        return 0
     return 1
 
 
@@ -1988,7 +1990,7 @@ async def reconcile_account_files(
     removed_files = 0
     for file_id, task_ids in direct.items():
         try:
-            await client.delete_file(file_id)
+            await _delete_remote_file(client, file_id)
         except NotFound:
             pass
         except PikPakError as exc:
@@ -2050,7 +2052,7 @@ async def _delete_drive_file(
     if not task.drive_file_id:
         return
     try:
-        await client.delete_file(task.drive_file_id)
+        await _delete_remote_file(client, task.drive_file_id)
         task.remote_deleted_at = utcnow()
         task.updated_at = utcnow()
     except NotFound:
