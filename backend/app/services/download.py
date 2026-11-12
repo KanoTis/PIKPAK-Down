@@ -1858,17 +1858,6 @@ async def _delete_remote_file(client, file_id: str) -> int:
     if not file_id:
         return 0
     try:
-        task_id = await client.trash_files([file_id])
-    except NotFound:
-        # It may already be in the trash; still try the permanent delete.
-        task_id = ""
-    if not await _wait_remote_task(client, task_id):
-        raise PikPakError(
-            "trash task did not finish",
-            code="CLEANUP_TASK_TIMEOUT",
-            retryable=True,
-        )
-    try:
         task_id = await client.delete_files([file_id])
     except NotFound:
         return 0
@@ -1881,30 +1870,46 @@ async def _delete_remote_file(client, file_id: str) -> int:
     return 1
 
 
-async def _delete_folder_tree(client, folder_id: str) -> int:
-    """Move a folder subtree to trash, then delete it permanently.
+async def _delete_folder_tree(client, folder_id: str, *, depth: int = 0) -> int:
+    """Delete a folder bottom-up with permanent delete tasks.
 
-    PIKPAK's batchDelete on a live non-empty folder deletes the folder record
-    without reliably freeing the subtree's quota. batchTrash handles the whole
-    subtree; the subsequent batchDelete removes the trashed folder for real.
+    Do not use batchTrash here: trashed items keep occupying PIKPAK quota, and
+    batchDelete does not reliably purge them. Enumerate children and delete
+    every file/folder directly instead.
     """
-    if not folder_id:
+    if not folder_id or depth > 8:
         return 0
-    try:
-        task_id = await client.trash_files([folder_id])
-    except NotFound:
-        # Already trashed; still try the permanent delete.
-        task_id = ""
-    if not await _wait_remote_task(client, task_id):
-        raise PikPakError(
-            "trash task did not finish",
-            code="CLEANUP_TASK_TIMEOUT",
-            retryable=True,
-        )
-    try:
-        task_id = await client.delete_files([folder_id])
-    except NotFound:
-        return 0
+    files: list[str] = []
+    folders: list[str] = []
+    page_token: str | None = None
+    for _ in range(200):
+        try:
+            data = await client.list_files(folder_id, page_token)
+        except NotFound:
+            return 0
+        for item in data.get("files") or []:
+            node = FileNode.from_json(item)
+            if node.trashed:
+                continue
+            if node.is_folder:
+                folders.append(node.id)
+            else:
+                files.append(node.id)
+        page_token = data.get("next_page_token") or None
+        if not page_token:
+            break
+    for child in folders:
+        await _delete_folder_tree(client, child, depth=depth + 1)
+    for index in range(0, len(files), 100):
+        chunk = files[index : index + 100]
+        task_id = await client.delete_files(chunk)
+        if not await _wait_remote_task(client, task_id):
+            raise PikPakError(
+                "delete task did not finish",
+                code="CLEANUP_TASK_TIMEOUT",
+                retryable=True,
+            )
+    task_id = await client.delete_files([folder_id])
     if not await _wait_remote_task(client, task_id):
         raise PikPakError(
             "delete task did not finish",

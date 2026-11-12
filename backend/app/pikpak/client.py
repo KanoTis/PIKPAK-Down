@@ -99,6 +99,10 @@ class FileNode:
         return self.kind == "drive#folder"
 
     @property
+    def trashed(self) -> bool:
+        return bool(self.raw.get("trashed"))
+
+    @property
     def is_video(self) -> bool:
         return bool(self.mime_type and self.mime_type.startswith("video/"))
 
