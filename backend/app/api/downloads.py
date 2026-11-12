@@ -291,6 +291,26 @@ async def _job_state_counts(
     return {str(state): int(count) for state, count in rows}
 
 
+@router.get("/download-jobs/{job_id}/audit")
+async def audit_download_job(
+    job_id: str, session: AsyncSession = Depends(get_session)
+) -> dict:
+    from ..pikpak.client import AnonymousPikPakClient
+    from ..pikpak.errors import PikPakError
+    from ..services.audit import audit_job
+
+    job = await session.get(DownloadJob, job_id)
+    if job is None:
+        raise _error(404, "JOB_NOT_FOUND", "下载任务不存在")
+    client = AnonymousPikPakClient()
+    try:
+        return await audit_job(session, job, client)
+    except PikPakError as exc:
+        raise _error(502, exc.code or "AUDIT_FAILED", str(exc)) from exc
+    finally:
+        await client.close()
+
+
 @router.get("/download-jobs/{job_id}", response_model=DownloadJobOut)
 async def get_download_job(
     job_id: str, session: AsyncSession = Depends(get_session)

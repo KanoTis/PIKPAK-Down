@@ -4,7 +4,7 @@ import asyncio
 
 import httpx
 import pytest
-from fake_pikpak_server import ACCOUNT_SHARE
+from fake_pikpak_server import ACCOUNT_SHARE, FOLDER_SHARE
 
 
 @pytest.mark.asyncio
@@ -255,6 +255,65 @@ def test_job_out_uses_state_counts() -> None:
     assert result.active_files == 2
     assert result.queued_files == 3
     assert result.cancelled_files == 0
+
+
+@pytest.mark.asyncio
+async def test_audit_detects_task_missing_from_share(env, fake_server) -> None:
+    from app.db import get_session_factory
+    from app.main import app
+    from app.models import DownloadJob, DownloadTask
+    from app.services.download import create_job, dispatch_downloads
+    from sqlalchemy import delete, select
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = await create_job(
+            session,
+            input_url=f"https://mypikpak.com/s/{FOLDER_SHARE}",
+            pass_code=None,
+        )
+        await session.commit()
+        job_id = job.id
+
+    for _ in range(300):
+        async with factory() as session:
+            await dispatch_downloads(session)
+            job = await session.get(DownloadJob, job_id)
+            tasks = (
+                await session.execute(
+                    select(DownloadTask).where(DownloadTask.job_id == job_id)
+                )
+            ).scalars().all()
+            if len(tasks) == 2:
+                break
+        await asyncio.sleep(0.1)
+    else:
+        raise AssertionError("job did not become ready")
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30) as client:
+        response = await client.get(f"/api/download-jobs/{job_id}/audit")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["expected_files"] == 2
+        assert body["missing_count"] == 0
+
+    async with factory() as session:
+        removed = (
+            await session.execute(
+                select(DownloadTask.id).where(DownloadTask.job_id == job_id).limit(1)
+            )
+        ).scalar_one()
+        await session.execute(delete(DownloadTask).where(DownloadTask.id == removed))
+        await session.commit()
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", timeout=30) as client:
+        response = await client.get(f"/api/download-jobs/{job_id}/audit")
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["task_files"] == 1
+        assert body["missing_count"] == 1
+        assert body["missing"][0]["file_id"]
 
 
 @pytest.mark.asyncio

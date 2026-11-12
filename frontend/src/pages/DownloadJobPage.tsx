@@ -11,7 +11,7 @@ import {
   Text,
   TextField,
 } from "@radix-ui/themes";
-import { ArrowLeft, Download, Pause, Play, RotateCcw, X } from "lucide-react";
+import { ArrowLeft, Download, Pause, Play, RotateCcw, ShieldCheck, X } from "lucide-react";
 
 import {
   client,
@@ -29,6 +29,17 @@ import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 
 type TaskCategory = "downloading" | "queued" | "failed" | "success";
+
+type AuditResult = {
+  expected_files: number;
+  task_files: number;
+  missing_count: number;
+  extra_count: number;
+  folders_scanned: number;
+  truncated: boolean;
+  missing: { file_id: string; path: string }[];
+  errors: { folder_id: string; path: string; error: string }[];
+};
 
 const TASK_TABS: { key: TaskCategory; label: string }[] = [
   { key: "downloading", label: "下载" },
@@ -95,6 +106,16 @@ export function DownloadJobPage() {
       void queryClient.invalidateQueries({ queryKey: ["job-files", jobId] });
       void queryClient.invalidateQueries({ queryKey: ["download-job", jobId] });
     },
+    onError: (error) => setActionError(errorMessage(error)),
+  });
+
+  const audit = useMutation({
+    mutationFn: async () =>
+      (await unwrap(
+        await client.GET("/api/download-jobs/{job_id}/audit", {
+          params: { path: { job_id: jobId } },
+        }),
+      )) as unknown as AuditResult,
     onError: (error) => setActionError(errorMessage(error)),
   });
 
@@ -179,6 +200,15 @@ export function DownloadJobPage() {
                 {retryJob.isPending ? "重试中" : "一键重试失败文件"}
               </Button>
             ) : null}
+            <Button
+              variant="soft"
+              color="green"
+              onClick={() => audit.mutate()}
+              disabled={audit.isPending}
+            >
+              <ShieldCheck size={14} aria-hidden />
+              {audit.isPending ? "核对中" : "核对完整性"}
+            </Button>
             {!terminal ? (
               <ConfirmButton
                 label="取消任务"
@@ -196,6 +226,34 @@ export function DownloadJobPage() {
 
       <ErrorBanner message={actionError} />
       <ErrorBanner message={job.error_message} />
+      {audit.data ? (
+        <Card size="2" mb="4">
+          <Flex align="center" gap="2" mb="2" wrap="wrap">
+            <ShieldCheck size={16} aria-hidden />
+            <Text weight="medium">
+              {audit.data.missing_count === 0 ? "分享与任务文件一致" : "发现缺失文件"}
+            </Text>
+            <Badge color={audit.data.missing_count === 0 ? "green" : "red"} variant="soft">
+              缺失 {audit.data.missing_count}
+            </Badge>
+          </Flex>
+          <Text as="div" size="1" color="gray">
+            分享 {audit.data.expected_files} 个文件 · 任务 {audit.data.task_files} 个 · 多出{" "}
+            {audit.data.extra_count} 个 · 扫描 {audit.data.folders_scanned} 个目录
+            {audit.data.truncated ? " · 已达扫描上限" : ""}
+          </Text>
+          {audit.data.missing.slice(0, 20).map((item) => (
+            <Text as="div" size="1" color="red" className="mono" key={item.file_id}>
+              {item.path}
+            </Text>
+          ))}
+          {audit.data.errors.slice(0, 5).map((item) => (
+            <Text as="div" size="1" color="amber" key={`${item.folder_id}-${item.error}`}>
+              目录 {item.path || item.folder_id}: {item.error}
+            </Text>
+          ))}
+        </Card>
+      ) : null}
 
       <div className="grid-cards" style={{ marginBottom: 20 }}>
         <Card size="2">

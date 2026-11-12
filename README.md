@@ -111,6 +111,7 @@ CACHE_DIR=/cache         下载临时目录
 - `POST /api/share-preview`：解析分享并分页浏览目录，供前端勾选
 - `GET /api/download-targets`：列出挂载下载目录下可选的目标子目录
 - `GET /api/settings`、`PATCH /api/settings`：运行时调整下载并发、单任务连接数与血缘预算，持久化到 `app_settings`
+- `GET /api/download-jobs/{id}/audit`：重新枚举分享并与任务文件比对，返回缺失/多出文件、扫描目录数和错误；用于确认旧版本目录枚举失败是否造成假成功
 - `POST/GET /api/download-jobs`（创建时 `target_subdir` 选择下载位置；同一分享与目标位置自动合并选择项）、`GET /api/download-jobs/{id}`、`GET /api/download-jobs/{id}/files`、`POST /api/download-jobs/{id}/cancel`、`DELETE /api/download-jobs/{id}`
 - `GET /api/downloads/{id}`、`POST /api/downloads/{id}/pause|resume|retry|cancel`、`GET /api/downloads/{id}/file`
 - `GET/POST /api/accounts`、`POST /api/accounts/{id}/refresh|enable|disable|reconcile`、`DELETE /api/accounts/{id}`、`GET /api/cleanups`。`reconcile` 会删除该账号上已完成/失败/取消任务留下的转存目录和 `pikpak_tar_*` 目录，并返回清理前后的 quota 明细。
@@ -136,6 +137,7 @@ uv run pytest backend/tests/integration -q
 
 ## 验证记录
 
+- 任务页“核对完整性”：重新枚举分享并与当前任务逐文件比对；缺失为 0 且无扫描错误才表示完整。旧版本已发生的漏文件也可用此检查。
 - 目录枚举：单页列表失败会保留页码重试 3 次；仍失败则任务直接 `FAILED` 并记录 `FOLDER_ENUMERATION_FAILED`，不会把空目录当成成功。
 - 云盘清理队列：删除调用会等待 PIKPAK 异步 task 完成；目录会递归删除子项。task 报错或超时会保持 `RETRYING`，不会误标 `DONE`。
 - 账号队列：任务先于账号创建时保持 `ACCOUNT_QUEUED`；账号加入后调度器会自动重新领取。任务自己持有的租约会直接复用；指向已删除/已结束任务的陈旧租约会自动清理，避免账号页显示“已租用”但任务仍等待。
