@@ -1271,6 +1271,10 @@ async def _start_aria2(
     if not aria2.available:
         raise PikPakError("aria2 不可用", code="ARIA2_UNAVAILABLE", retryable=True)
     directory = get_settings().cache_dir / task.id
+    if task.route == "tar":
+        # tar responses have no usable Range; a leftover partial makes aria2
+        # abort with rc=8 instead of restarting from zero.
+        await asyncio.to_thread(shutil.rmtree, directory, True)
     gid = await aria2.add_uri(
         url, directory, "download.bin", single_connection=single_connection
     )
@@ -1458,7 +1462,8 @@ async def _handoff_via_tar(
     task.error_message = None
     await session.commit()
 
-    await _delete_drive_file(session, task, account, client)
+    # Do not delete the restored source yet: the tar CDN entry points at it.
+    # _mark_task_done removes the whole tar folder after verification.
     await release_account(session, account.id, task.id)
     await session.commit()
 
@@ -1498,7 +1503,11 @@ async def _handoff_with_account(
         wcl = decrypt(task.source_url_enc) or ""
         expire = task.source_url_expire
         if wcl and (expire is None or expire > int(utcnow().timestamp()) + 300):
-            if task.drive_file_id and not task.remote_deleted_at:
+            if (
+                task.route != "tar"
+                and task.drive_file_id
+                and not task.remote_deleted_at
+            ):
                 await _delete_drive_file(session, task, account, client)
             await release_account(session, account.id, task.id)
             await session.commit()
@@ -1903,6 +1912,13 @@ async def _cleanup_stale_tar_folders(
                 continue
             for task in tasks:
                 if task.tar_folder_id == node.id:
+                    if task.route == "tar" and task.tar_size and task.drive_file_id:
+                        try:
+                            await _delete_remote_file(client, task.drive_file_id)
+                            task.drive_file_id = None
+                            task.remote_deleted_at = utcnow()
+                        except (NotFound, PikPakError):
+                            pass
                     if task.status == TaskStatus.ACCOUNT_QUEUED:
                         _reset_tar_task(task)
                     else:
@@ -2020,27 +2036,46 @@ async def reconcile_account_files(
 
 async def _delete_tar_folder(session: AsyncSession, task: DownloadTask) -> None:
     folder_id = task.tar_folder_id
-    if not folder_id or not task.account_id:
+    tar_file_id = task.drive_file_id
+    if not folder_id and not tar_file_id:
+        return
+    if not task.account_id:
         return
     account = await session.get(Account, task.account_id)
     if account is None:
         return
     client = make_client(account)
     try:
-        await _delete_folder_tree(client, folder_id)
-        task.tar_folder_id = None
-        await session.commit()
-    except NotFound:
-        task.tar_folder_id = None
-        await session.commit()
-    except (PikPakError, Unauthorized) as exc:
-        await enqueue_cleanup(
-            session,
-            account_id=account.id,
-            drive_file_id=folder_id,
-            task_id=task.id,
-            error=str(exc),
-        )
+        if folder_id:
+            try:
+                await _delete_folder_tree(client, folder_id)
+                task.tar_folder_id = None
+            except NotFound:
+                task.tar_folder_id = None
+            except (PikPakError, Unauthorized) as exc:
+                await enqueue_cleanup(
+                    session,
+                    account_id=account.id,
+                    drive_file_id=folder_id,
+                    task_id=task.id,
+                    error=str(exc),
+                )
+        if tar_file_id:
+            try:
+                await _delete_remote_file(client, tar_file_id)
+                task.drive_file_id = None
+                task.remote_deleted_at = utcnow()
+            except NotFound:
+                task.drive_file_id = None
+                task.remote_deleted_at = utcnow()
+            except (PikPakError, Unauthorized) as exc:
+                await enqueue_cleanup(
+                    session,
+                    account_id=account.id,
+                    drive_file_id=tar_file_id,
+                    task_id=task.id,
+                    error=str(exc),
+                )
         await session.commit()
     finally:
         await client.close()
@@ -2105,7 +2140,7 @@ async def _handle_handoff_error(
         try:
             if task.tar_folder_id:
                 try:
-                    await cleanup_client.delete_file(task.tar_folder_id)
+                    await _delete_folder_tree(cleanup_client, task.tar_folder_id)
                 except (NotFound, PikPakError):
                     pass
                 task.tar_folder_id = None
@@ -2183,6 +2218,10 @@ async def _poll_downloads(session: AsyncSession) -> None:
 async def _requeue_lost_download(session: AsyncSession, task: DownloadTask) -> None:
     task.aria2_gid = None
     task.speed = 0
+    if task.route == "tar":
+        await asyncio.to_thread(
+            shutil.rmtree, get_settings().cache_dir / task.id, True
+        )
     if task.route in ("account", "tar"):
         await _clear_account_link(session, task)
         task.download_cycles += 1
@@ -2206,6 +2245,10 @@ async def _handle_download_failure(
     task.error_message = message
     task.speed = 0
     task.aria2_gid = None
+    if task.route == "tar":
+        await asyncio.to_thread(
+            shutil.rmtree, get_settings().cache_dir / task.id, True
+        )
     if task.route in ("account", "tar"):
         await _clear_account_link(session, task)
         task.download_cycles += 1
@@ -2285,7 +2328,7 @@ async def _mark_task_done(
     )
     await _refresh_job(session, job)
     await session.commit()
-    if task.route == "tar" and task.tar_folder_id:
+    if task.route == "tar":
         await _delete_tar_folder(session, task)
 
 
@@ -2315,7 +2358,7 @@ async def _mark_duplicate_skipped(
     )
     await _refresh_job(session, job)
     await session.commit()
-    if task.route == "tar" and task.tar_folder_id:
+    if task.route == "tar":
         await _delete_tar_folder(session, task)
 
 

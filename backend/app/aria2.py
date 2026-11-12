@@ -87,7 +87,10 @@ class Aria2Manager:
                 "--timeout=60",
                 "--auto-file-renaming=false",
                 "--allow-overwrite=false",
-                "--check-certificate=true",
+                # PIKPAK CDN has served expired certs; tar/account downloads are
+                # verified by size + Merkle-gcid after they land. Global option
+                # wins over per-download options in aria2 1.37.
+                "--check-certificate=false",
                 "--file-allocation=none",
                 "--summary-interval=0",
                 "--console-log-level=warn",

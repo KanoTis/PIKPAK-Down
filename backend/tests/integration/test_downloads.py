@@ -777,8 +777,10 @@ async def test_tar_fallback_packs_and_starts_single_connection(env, fake_server,
         id = "account-stub"
 
     started: list[dict] = []
+    deleted: list[str] = []
 
     async def fake_delete(session, task, account, client):
+        deleted.append(task.drive_file_id or "")
         task.remote_deleted_at = download.utcnow()
         await session.commit()
 
@@ -833,6 +835,7 @@ async def test_tar_fallback_packs_and_starts_single_connection(env, fake_server,
             }
         ]
         assert ("pack", "TARFOLDER0000001") in client.calls
+        assert deleted == []
 
 
 @pytest.mark.asyncio
@@ -1166,13 +1169,71 @@ async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
         await session.refresh(queued)
 
     assert removed == 2
-    assert client.deleted == ["TARFOLDERDONE001", "TARFOLDERQUEUED1"]
+    assert client.deleted == [
+        "TARFOLDERDONE001",
+        "TARFOLDERQUEUED1",
+        "TARSOURCEEXIST01",
+    ]
     assert done.tar_folder_id is None
     assert active.tar_folder_id == "TARFOLDERACTIVE1"
     assert queued.tar_folder_id is None
     assert queued.drive_file_id is None
     assert queued.restore_task_id is None
     assert queued.tar_size == 0
+
+
+@pytest.mark.asyncio
+async def test_tar_start_clears_partial_cache(env, monkeypatch) -> None:
+    from app.aria2 import aria2
+    from app.db import get_session_factory
+    from app.models import DownloadJob, DownloadTask, JobStatus, TaskStatus
+    from app.services import download
+
+    captured: dict[str, str] = {}
+
+    async def fake_add_uri(url, directory, out, *, single_connection=False):
+        captured["directory"] = str(directory)
+        captured["single_connection"] = str(single_connection)
+        return "gid-tar-cache"
+
+    monkeypatch.setattr(aria2, "add_uri", fake_add_uri)
+    monkeypatch.setattr(aria2, "_available", True)
+
+    factory = get_session_factory()
+    async with factory() as session:
+        job = DownloadJob(
+            input_url="https://mypikpak.com/s/TARCACHE00000001",
+            share_id="TARCACHE00000001",
+            status=JobStatus.READY,
+        )
+        session.add(job)
+        await session.flush()
+        task = DownloadTask(
+            job_id=job.id,
+            share_file_id="TARCACHEFILE0001",
+            name="tar-cache.bin",
+            relative_path="tar-cache.bin",
+            size=10,
+            expected_hash="HASH",
+            status=TaskStatus.WCL_READY,
+            route="tar",
+        )
+        session.add(task)
+        await session.commit()
+        partial = env.cache_dir / task.id / "download.bin"
+        partial.parent.mkdir(parents=True, exist_ok=True)
+        partial.write_bytes(b"stale-partial")
+        await download._start_aria2(
+            session,
+            task,
+            "http://example.test/tar",
+            TaskStatus.ACCOUNT_DOWNLOADING,
+            size=10,
+            single_connection=True,
+        )
+        assert captured["directory"] == str(env.cache_dir / task.id)
+        assert captured["single_connection"] == "True"
+        assert not partial.exists()
 
 
 @pytest.mark.asyncio
