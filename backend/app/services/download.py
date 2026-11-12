@@ -204,23 +204,34 @@ async def _create_job(
     if len(selection) > 1000:
         raise ValueError("一次最多选择 1000 项")
     normalized_target = _safe_subdir(target_subdir)
-    status_filter = (
-        DownloadJob.status != JobStatus.CANCELLED
-        if selection
-        else DownloadJob.status.in_([JobStatus.ENUMERATING, JobStatus.READY])
-    )
     existing: DownloadJob | None = (
         await session.execute(
             select(DownloadJob)
             .where(
                 DownloadJob.share_id == parsed.share_id,
                 DownloadJob.target_subdir == normalized_target,
-                status_filter,
+                DownloadJob.status.in_([JobStatus.ENUMERATING, JobStatus.READY]),
             )
             .order_by(DownloadJob.updated_at.desc(), DownloadJob.created_at.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
+    if existing is None and selection:
+        # With no active job, a selection may still extend a completed job.
+        existing = (
+            await session.execute(
+                select(DownloadJob)
+                .where(
+                    DownloadJob.share_id == parsed.share_id,
+                    DownloadJob.target_subdir == normalized_target,
+                    DownloadJob.status != JobStatus.CANCELLED,
+                )
+                .order_by(
+                    DownloadJob.updated_at.desc(), DownloadJob.created_at.desc()
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
 
     if existing is not None:
         job = existing
@@ -682,15 +693,18 @@ async def _process_folders(
             raise
         except PikPakError as exc:
             folder.attempts += 1
-            job.error_code = exc.code or "FOLDER_ENUMERATION_FAILED"
-            job.error_message = f"目录枚举失败: {exc}"
-            if folder.attempts >= 3:
+            fatal = folder.attempts >= 3 or not exc.retryable
+            if fatal:
                 folder.status = FolderStatus.FAILED
                 job.status = JobStatus.FAILED
+                job.error_code = exc.code or "FOLDER_ENUMERATION_FAILED"
+                job.error_message = f"目录枚举失败: {exc}"
                 job.finished_at = utcnow()
             else:
                 # Keep the page token so a retry resumes the same page.
                 folder.status = FolderStatus.PENDING
+                job.error_code = None
+                job.error_message = None
             events.emit(
                 session,
                 "download_job",
@@ -700,7 +714,7 @@ async def _process_folders(
                     "folder_id": folder.folder_id,
                     "attempt": folder.attempts,
                     "error": str(exc),
-                    "fatal": folder.status == FolderStatus.FAILED,
+                    "fatal": fatal,
                 },
             )
             await session.commit()
@@ -736,6 +750,7 @@ async def _process_folders(
                 await _upsert_task(
                     session, job, node, relative_path=relative, sort_index=sort_base + index
                 )
+        folder.attempts = 0
         folder.page_token = page.next_page_token or None
         if not page.next_page_token:
             folder.status = FolderStatus.DONE
@@ -751,6 +766,9 @@ async def _process_folders(
     ).scalar_one()
     if pending:
         return
+    if job.status == JobStatus.ENUMERATING:
+        job.error_code = None
+        job.error_message = None
     if await _enrich_tasks(session, job, client):
         if job.status == JobStatus.ENUMERATING:
             job.status = JobStatus.READY
@@ -788,6 +806,23 @@ async def dispatch_downloads(session: AsyncSession) -> None:
         except Exception:  # noqa: BLE001
             log.exception("download_poll_failed")
             await session.rollback()
+
+
+async def _finish_enumeration_error(
+    session: AsyncSession, job_id: str, exc: PikPakError
+) -> DownloadJob | None:
+    """Persist enum failure state consistently for selected and full shares."""
+    await session.rollback()
+    job = await session.get(DownloadJob, job_id)
+    if job is None:
+        return None
+    if job.status != JobStatus.FAILED and not exc.retryable:
+        job.status = JobStatus.FAILED
+        job.error_code = exc.code or "ENUMERATION_FAILED"
+        job.error_message = str(exc)
+        job.finished_at = utcnow()
+    await session.commit()
+    return job
 
 
 async def _dispatch_enumeration(session: AsyncSession) -> None:
@@ -836,14 +871,9 @@ async def _dispatch_enumeration(session: AsyncSession) -> None:
                     await session.rollback()
                     continue
                 except PikPakError as exc:
-                    await session.rollback()
-                    job = await session.get(DownloadJob, job_id)
-                    if job is not None:
-                        job.status = JobStatus.FAILED
-                        job.error_code = exc.code or "ENUMERATION_FAILED"
-                        job.error_message = str(exc)
-                        job.finished_at = utcnow()
-                await session.commit()
+                    job = await _finish_enumeration_error(session, job_id, exc)
+                else:
+                    await session.commit()
                 if job is None:
                     continue
             else:
@@ -873,14 +903,9 @@ async def _dispatch_enumeration(session: AsyncSession) -> None:
                         await session.rollback()
                         continue
                     except PikPakError as exc:
-                        await session.rollback()
-                        job = await session.get(DownloadJob, job_id)
-                        if job is not None and exc.code in ("NOT_FOUND", "PERMISSION_DENIED"):
-                            job.status = JobStatus.FAILED
-                            job.error_code = exc.code
-                            job.error_message = str(exc)
-                            job.finished_at = utcnow()
-                    await session.commit()
+                        job = await _finish_enumeration_error(session, job_id, exc)
+                    else:
+                        await session.commit()
                     if job is None:
                         continue
             await _refresh_job(session, job)

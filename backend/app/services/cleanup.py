@@ -111,14 +111,13 @@ async def dispatch_cleanups(session: AsyncSession, limit: int = 10) -> int:
         client = make_client(account)
         try:
             is_folder = False
-            try:
-                node = await client.get_file(cleanup.drive_file_id)
-                node = node.get("file") or node
-                is_folder = str(node.get("kind") or "") == "drive#folder"
-            except NotFound:
-                is_folder = False
-            except PikPakError:
-                is_folder = False
+            # Any lookup failure must go through the RETRYING branch: deleting
+            # an unprobed id directly could delete a folder without clearing
+            # its children. NotFound is handled by the outer except as done.
+            node = await client.get_file(cleanup.drive_file_id)
+            node = node.get("file") or node
+            is_folder = str(node.get("kind") or "") == "drive#folder"
+
             if is_folder:
                 await delete_folder_tree(client, cleanup.drive_file_id)
             else:
