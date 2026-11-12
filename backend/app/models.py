@@ -13,6 +13,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -94,6 +95,16 @@ class LineageStatus:
 
 class DownloadJob(Base):
     __tablename__ = "download_jobs"
+    __table_args__ = (
+        Index(
+            "uq_download_job_active_share_target",
+            "share_id",
+            "target_subdir",
+            unique=True,
+            sqlite_where=text("status IN ('ENUMERATING', 'READY')"),
+            postgresql_where=text("status IN ('ENUMERATING', 'READY')"),
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     input_url: Mapped[str] = mapped_column(Text)
@@ -132,6 +143,7 @@ class DownloadFolder(Base):
     path: Mapped[str] = mapped_column(Text, default="")
     page_token: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default=FolderStatus.PENDING)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, onupdate=utcnow

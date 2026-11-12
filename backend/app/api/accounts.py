@@ -66,10 +66,24 @@ def cleanup_out(cleanup: CleanupTask) -> CleanupOut:
     )
 
 
-def _error(status: int, code: str, message: str) -> HTTPException:
+def _error(
+    status: int,
+    code: str,
+    message: str,
+    *,
+    retryable: bool = False,
+    details: dict | None = None,
+) -> HTTPException:
     return HTTPException(
         status_code=status,
-        detail={"error": {"code": code, "message": message, "retryable": False, "details": {}}},
+        detail={
+            "error": {
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+                "details": details or {},
+            }
+        },
     )
 
 

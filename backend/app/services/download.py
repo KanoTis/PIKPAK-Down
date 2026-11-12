@@ -11,6 +11,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..aria2 import Aria2Error, aria2
@@ -55,6 +56,15 @@ from .accounts import (
 )
 from .cleanup import enqueue_cleanup
 from .planner import DownloadPlan, anonymous_plan
+from .remote_files import (
+    delete_folder_tree as _delete_folder_tree,
+)
+from .remote_files import (
+    delete_remote_file as _delete_remote_file,
+)
+from .remote_files import (
+    wait_remote_task as _wait_remote_task,
+)
 from .verifier import extract_tar_member, verify_file
 from .windows import probe_tail_exact, probe_with_retries
 
@@ -137,6 +147,34 @@ async def create_job(
     items: list[dict] | None = None,
     target_subdir: str | None = None,
 ) -> DownloadJob:
+    try:
+        return await _create_job(
+            session,
+            input_url=input_url,
+            pass_code=pass_code,
+            items=items,
+            target_subdir=target_subdir,
+        )
+    except IntegrityError:
+        # A concurrent request won the unique (share_id, target_subdir) race.
+        await session.rollback()
+        return await _create_job(
+            session,
+            input_url=input_url,
+            pass_code=pass_code,
+            items=items,
+            target_subdir=target_subdir,
+        )
+
+
+async def _create_job(
+    session: AsyncSession,
+    *,
+    input_url: str,
+    pass_code: str | None,
+    items: list[dict] | None = None,
+    target_subdir: str | None = None,
+) -> DownloadJob:
     parsed = parse_share_input(input_url, pass_code)
     input_display = parsed.source_url or input_url
     if parsed.source_url:
@@ -166,26 +204,32 @@ async def create_job(
     if len(selection) > 1000:
         raise ValueError("一次最多选择 1000 项")
     normalized_target = _safe_subdir(target_subdir)
-    existing: DownloadJob | None = None
-    if selection:
-        existing = (
-            await session.execute(
-                select(DownloadJob)
-                .where(
-                    DownloadJob.share_id == parsed.share_id,
-                    DownloadJob.target_subdir == normalized_target,
-                    DownloadJob.status != JobStatus.CANCELLED,
-                )
-                .order_by(DownloadJob.updated_at.desc(), DownloadJob.created_at.desc())
-                .limit(1)
+    status_filter = (
+        DownloadJob.status != JobStatus.CANCELLED
+        if selection
+        else DownloadJob.status.in_([JobStatus.ENUMERATING, JobStatus.READY])
+    )
+    existing: DownloadJob | None = (
+        await session.execute(
+            select(DownloadJob)
+            .where(
+                DownloadJob.share_id == parsed.share_id,
+                DownloadJob.target_subdir == normalized_target,
+                status_filter,
             )
-        ).scalar_one_or_none()
+            .order_by(DownloadJob.updated_at.desc(), DownloadJob.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
 
     if existing is not None:
         job = existing
         job.input_url = input_display
         if parsed.pass_code:
             job.pass_code_enc = encrypt(parsed.pass_code)
+        if not selection:
+            await session.flush()
+            return job
         existing_ids = set(
             (
                 await session.execute(
@@ -637,18 +681,30 @@ async def _process_folders(
         except RateLimited:
             raise
         except PikPakError as exc:
-            folder.status = FolderStatus.DONE
-            folder.page_token = None
+            folder.attempts += 1
+            job.error_code = exc.code or "FOLDER_ENUMERATION_FAILED"
             job.error_message = f"目录枚举失败: {exc}"
+            if folder.attempts >= 3:
+                folder.status = FolderStatus.FAILED
+                job.status = JobStatus.FAILED
+                job.finished_at = utcnow()
+            else:
+                # Keep the page token so a retry resumes the same page.
+                folder.status = FolderStatus.PENDING
             events.emit(
                 session,
                 "download_job",
                 job.id,
                 "download_job.folder_failed",
-                {"folder_id": folder.folder_id, "error": str(exc)},
+                {
+                    "folder_id": folder.folder_id,
+                    "attempt": folder.attempts,
+                    "error": str(exc),
+                    "fatal": folder.status == FolderStatus.FAILED,
+                },
             )
             await session.commit()
-            continue
+            raise
         sort_base = int(
             (
                 await session.execute(
@@ -893,6 +949,11 @@ async def _dispatch_plans(session: AsyncSession) -> None:
             except Exception:  # noqa: BLE001
                 log.exception("plan_task_failed", task_id=task_id)
                 await worker_session.rollback()
+                task = await worker_session.get(DownloadTask, task_id)
+                if task is not None and task.status == TaskStatus.PLANNING:
+                    _set_status(task, TaskStatus.DISCOVERED)
+                    task.queue_reason = "PLAN_FAILED"
+                    await worker_session.commit()
 
     try:
         await asyncio.gather(*(plan_one(task_id) for task_id in task_ids))
@@ -1833,92 +1894,6 @@ def _reset_tar_task(task: DownloadTask) -> None:
     task.error_code = None
     task.error_message = None
     task.queue_reason = "NO_QUOTA"
-
-
-async def _wait_remote_task(client, task_id: str, *, timeout: float = 60.0) -> bool:
-    if not task_id:
-        return True
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        try:
-            state = await client.get_restore_task(task_id)
-        except NotFound:
-            return True
-        except PikPakError:
-            raise
-        phase = str(state.get("phase") or "").upper()
-        message = str(state.get("message") or "").lower()
-        if phase in ("PHASE_TYPE_COMPLETE", "COMPLETE") or message == "completed":
-            return True
-        if phase in ("PHASE_TYPE_ERROR", "ERROR") or message in ("error", "failed"):
-            return False
-        await asyncio.sleep(1.5)
-    return False
-
-
-async def _delete_remote_file(client, file_id: str) -> int:
-    if not file_id:
-        return 0
-    try:
-        task_id = await client.delete_files([file_id])
-    except NotFound:
-        return 0
-    if not await _wait_remote_task(client, task_id):
-        raise PikPakError(
-            "delete task did not finish",
-            code="CLEANUP_TASK_TIMEOUT",
-            retryable=True,
-        )
-    return 1
-
-
-async def _delete_folder_tree(client, folder_id: str, *, depth: int = 0) -> int:
-    """Delete a folder bottom-up with permanent delete tasks.
-
-    Do not use batchTrash here: trashed items keep occupying PIKPAK quota, and
-    batchDelete does not reliably purge them. Enumerate children and delete
-    every file/folder directly instead.
-    """
-    if not folder_id or depth > 8:
-        return 0
-    files: list[str] = []
-    folders: list[str] = []
-    page_token: str | None = None
-    for _ in range(200):
-        try:
-            data = await client.list_files(folder_id, page_token)
-        except NotFound:
-            return 0
-        for item in data.get("files") or []:
-            node = FileNode.from_json(item)
-            if node.trashed:
-                continue
-            if node.is_folder:
-                folders.append(node.id)
-            else:
-                files.append(node.id)
-        page_token = data.get("next_page_token") or None
-        if not page_token:
-            break
-    for child in folders:
-        await _delete_folder_tree(client, child, depth=depth + 1)
-    for index in range(0, len(files), 100):
-        chunk = files[index : index + 100]
-        task_id = await client.delete_files(chunk)
-        if not await _wait_remote_task(client, task_id):
-            raise PikPakError(
-                "delete task did not finish",
-                code="CLEANUP_TASK_TIMEOUT",
-                retryable=True,
-            )
-    task_id = await client.delete_files([folder_id])
-    if not await _wait_remote_task(client, task_id):
-        raise PikPakError(
-            "delete task did not finish",
-            code="CLEANUP_TASK_TIMEOUT",
-            retryable=True,
-        )
-    return 1
 
 
 async def _cleanup_stale_tar_folders(

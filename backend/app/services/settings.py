@@ -91,9 +91,7 @@ async def update_overrides(session: AsyncSession, payload: dict[str, Any]) -> di
         if value is None:
             continue
         if key == "task_connections":
-            checked = _check("aria2_split", int(value))
-            actual["aria2_split"] = checked
-            actual["aria2_max_connection_per_server"] = checked
+            actual["aria2_split"] = _check("aria2_split", int(value))
         elif key == "duplicate_name_policy":
             if value not in DUPLICATE_POLICIES:
                 raise SettingsValidation("duplicate_name_policy 取值非法")

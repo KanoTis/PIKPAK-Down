@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, Flex, Heading, Table, Text, TextField } from "@radix-ui/themes";
-import { Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Eraser, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { client, errorMessage, formatBytes, formatDate, unwrap } from "../api/client";
 import { ConfirmButton } from "../components/ConfirmButton";
 import { ErrorBanner } from "../components/ErrorBanner";
@@ -61,6 +61,21 @@ export function AccountsPage() {
     onSuccess: () => {
       setFormError(null);
       void queryClient.invalidateQueries({ queryKey: ["accounts"] });
+    },
+    onError: (error) => setFormError(errorMessage(error)),
+  });
+
+  const emptyTrash = useMutation({
+    mutationFn: async (id: string) =>
+      unwrap(
+        await client.POST("/api/accounts/{account_id}/trash/empty", {
+          params: { path: { account_id: id }, query: { force: true } },
+        }),
+      ),
+    onSuccess: () => {
+      setFormError(null);
+      void queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      void queryClient.invalidateQueries({ queryKey: ["cleanups"] });
     },
     onError: (error) => setFormError(errorMessage(error)),
   });
@@ -254,6 +269,16 @@ export function AccountsPage() {
                             停用
                           </Button>
                         )}
+                        <ConfirmButton
+                          title="清空回收站？"
+                          description="会永久删除该账号回收站里的全部内容，包括非本应用创建的文件，并释放被占用的配额。"
+                          confirmLabel="清空"
+                          color="amber"
+                          disabled={emptyTrash.isPending}
+                          onConfirm={() => emptyTrash.mutate(account.id)}
+                        >
+                          <Eraser size={13} aria-hidden /> 清空回收站
+                        </ConfirmButton>
                         <ConfirmButton
                           title="删除账号？"
                           description="仅无租约且无未完成清理任务时可删除；历史任务保留账号名称快照。"

@@ -46,7 +46,7 @@ const FIELDS: {
   {
     key: "task_connections",
     label: "单任务连接数",
-    hint: "每个文件使用的 aria2 split / 每服务器连接数；只影响新任务。",
+    hint: "每个文件使用的 aria2 split；每服务器连接数由 ARIA2_MAX_CONNECTION_PER_SERVER 独立配置。只影响新任务。",
     min: 1,
     max: 16,
   },

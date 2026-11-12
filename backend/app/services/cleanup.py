@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import Account, AccountState, CleanupState, CleanupTask, utcnow
 from ..pikpak.errors import NotFound, PikPakError, Unauthorized
 from .accounts import make_client, mark_invalid, release_account
+from .remote_files import delete_folder_tree, delete_remote_file
 
 MAX_CLEANUP_ATTEMPTS = 10
 
@@ -109,7 +110,19 @@ async def dispatch_cleanups(session: AsyncSession, limit: int = 10) -> int:
 
         client = make_client(account)
         try:
-            await client.delete_file(cleanup.drive_file_id)
+            is_folder = False
+            try:
+                node = await client.get_file(cleanup.drive_file_id)
+                node = node.get("file") or node
+                is_folder = str(node.get("kind") or "") == "drive#folder"
+            except NotFound:
+                is_folder = False
+            except PikPakError:
+                is_folder = False
+            if is_folder:
+                await delete_folder_tree(client, cleanup.drive_file_id)
+            else:
+                await delete_remote_file(client, cleanup.drive_file_id)
             cleanup.state = CleanupState.DONE
             cleanup.completed_at = utcnow()
             cleanup.last_error = None
