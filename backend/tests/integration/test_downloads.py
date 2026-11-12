@@ -1167,6 +1167,16 @@ async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
                 "name": f"pikpak_tar_{queued.id[:8]}",
             },
             {"id": "OTHERFOLDER00001", "kind": "drive#folder", "name": "not-ours"},
+            {
+                "id": "TARFILEDONE001",
+                "kind": "drive#file",
+                "name": f"pikpak_tar_{done.id[:8]}.tar",
+            },
+            {
+                "id": "TARFILEACTIVE1",
+                "kind": "drive#file",
+                "name": f"pikpak_tar_{active.id[:8]}.tar",
+            },
         ]
         client = FakeCleanupClient(folders)
         removed = await download._cleanup_stale_tar_folders(session, client)
@@ -1174,11 +1184,12 @@ async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
         await session.refresh(active)
         await session.refresh(queued)
 
-    assert removed == 2
+    assert removed == 3
     assert client.deleted == [
         "TARFOLDERDONE001",
         "TARFOLDERQUEUED1",
         "TARSOURCEEXIST01",
+        "TARFILEDONE001",
     ]
     assert done.tar_folder_id is None
     assert active.tar_folder_id == "TARFOLDERACTIVE1"

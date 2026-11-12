@@ -1919,7 +1919,7 @@ async def _cleanup_stale_tar_folders(
     *,
     exclude_task_id: str | None = None,
 ) -> int:
-    """Delete app-created tar folders that no running task still needs."""
+    """Delete app-created tar folders and .tar files no running task needs."""
     removed = 0
     page_token: str | None = None
     for _ in range(50):
@@ -1930,9 +1930,18 @@ async def _cleanup_stale_tar_folders(
             break
         for item in data.get("files") or []:
             node = FileNode.from_json(item)
-            if not node.is_folder or not node.name.startswith(TAR_FOLDER_PREFIX):
-                continue
-            suffix = node.name[len(TAR_FOLDER_PREFIX) :]
+            is_folder = node.is_folder
+            if is_folder:
+                if not node.name.startswith(TAR_FOLDER_PREFIX):
+                    continue
+                suffix = node.name[len(TAR_FOLDER_PREFIX) :]
+            else:
+                if not (
+                    node.name.startswith(TAR_FOLDER_PREFIX)
+                    and node.name.endswith(".tar")
+                ):
+                    continue
+                suffix = node.name[len(TAR_FOLDER_PREFIX) : -4]
             if not suffix:
                 continue
             tasks = (
@@ -1945,17 +1954,26 @@ async def _cleanup_stale_tar_folders(
             if any(task.status in _ACTIVE_TAR_STATES for task in tasks):
                 continue
             try:
-                await _delete_folder_tree(client, node.id)
+                if is_folder:
+                    await _delete_folder_tree(client, node.id)
+                else:
+                    await _delete_remote_file(client, node.id)
             except NotFound:
                 pass
             except PikPakError as exc:
                 log.warning(
-                    "tar_folder_delete_failed",
-                    folder_id=node.id,
+                    "tar_artifact_delete_failed",
+                    file_id=node.id,
+                    is_folder=is_folder,
                     error=str(exc),
                 )
                 continue
             for task in tasks:
+                if not is_folder and task.drive_file_id == node.id:
+                    task.drive_file_id = None
+                    task.remote_deleted_at = utcnow()
+                    if task.status == TaskStatus.ACCOUNT_QUEUED:
+                        _reset_tar_task(task)
                 if task.tar_folder_id == node.id:
                     if task.route == "tar" and task.tar_size and task.drive_file_id:
                         try:
