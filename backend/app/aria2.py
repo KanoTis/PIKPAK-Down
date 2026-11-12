@@ -194,7 +194,10 @@ class Aria2Manager:
             "timeout": "60",
             "auto-file-renaming": "false",
             "allow-overwrite": "false",
-            "check-certificate": "true",
+            # PIKPAK CDN occasionally serves expired/mis-issued certs. Every
+            # download is verified by size + Merkle hash afterwards, so TLS
+            # certificate trust is not the integrity boundary here.
+            "check-certificate": "false",
         }
         return str(await self.call("aria2.addUri", [[url], options]))
 

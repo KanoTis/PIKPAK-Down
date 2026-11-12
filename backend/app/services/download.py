@@ -1823,6 +1823,40 @@ def _reset_tar_task(task: DownloadTask) -> None:
     task.queue_reason = "NO_QUOTA"
 
 
+async def _delete_folder_tree(
+    client,
+    folder_id: str,
+    *,
+    depth: int = 0,
+) -> int:
+    """Delete a folder and its contents; batchDelete alone is not recursive."""
+    if depth > 8 or not folder_id:
+        return 0
+    files: list[str] = []
+    folders: list[str] = []
+    page_token: str | None = None
+    for _ in range(200):
+        try:
+            data = await client.list_files(folder_id, page_token)
+        except NotFound:
+            return 0
+        for item in data.get("files") or []:
+            node = FileNode.from_json(item)
+            if node.is_folder:
+                folders.append(node.id)
+            else:
+                files.append(node.id)
+        page_token = data.get("next_page_token") or None
+        if not page_token:
+            break
+    for child in folders:
+        await _delete_folder_tree(client, child, depth=depth + 1)
+    for index in range(0, len(files), 100):
+        await client.delete_files(files[index : index + 100])
+    await client.delete_file(folder_id)
+    return 1
+
+
 async def _cleanup_stale_tar_folders(
     session: AsyncSession,
     client,
@@ -1855,7 +1889,7 @@ async def _cleanup_stale_tar_folders(
             if any(task.status in _ACTIVE_TAR_STATES for task in tasks):
                 continue
             try:
-                await client.delete_file(node.id)
+                await _delete_folder_tree(client, node.id)
             except NotFound:
                 pass
             except PikPakError as exc:
@@ -1931,7 +1965,7 @@ async def reconcile_account_files(
         if folder_id in active_folders:
             continue
         try:
-            await client.delete_file(folder_id)
+            await _delete_folder_tree(client, folder_id)
         except NotFound:
             pass
         except PikPakError as exc:
@@ -1991,7 +2025,7 @@ async def _delete_tar_folder(session: AsyncSession, task: DownloadTask) -> None:
         return
     client = make_client(account)
     try:
-        await client.delete_file(folder_id)
+        await _delete_folder_tree(client, folder_id)
         task.tar_folder_id = None
         await session.commit()
     except NotFound:

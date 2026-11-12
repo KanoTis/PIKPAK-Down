@@ -9,10 +9,9 @@ import time
 import httpx
 import pytest
 import uvicorn
-
 from fake_pikpak_server import (
-    ANON_SHARE,
     ACCOUNT_SHARE,
+    ANON_SHARE,
     BADLINK_SHARE,
     FAIL_SHARE,
     FOLDER_FILE1,
@@ -986,6 +985,19 @@ async def test_reconcile_account_files_deletes_tracked_terminal_files(env) -> No
     class FakeReconcileClient:
         def __init__(self) -> None:
             self.deleted: list[list[str]] = []
+            self.children = {
+                "RECONCILEFOLDER001": [
+                    {"id": "RECONCILECHILD001", "kind": "drive#file"}
+                ]
+            }
+
+        async def list_files(self, parent_id, page_token=None):
+            if not parent_id:
+                return {"files": [], "next_page_token": ""}
+            return {
+                "files": list(self.children.get(parent_id, [])),
+                "next_page_token": "",
+            }
 
         async def delete_files(self, file_ids: list[str]) -> int:
             self.deleted.append(list(file_ids))
@@ -1041,7 +1053,11 @@ async def test_reconcile_account_files_deletes_tracked_terminal_files(env) -> No
         "files_removed": 1,
         "failed": 0,
     }
-    assert client.deleted == [["RECONCILEFOLDER001"], ["RECONCILEFILE0002"]]
+    assert client.deleted == [
+        ["RECONCILECHILD001"],
+        ["RECONCILEFOLDER001"],
+        ["RECONCILEFILE0002"],
+    ]
     assert tasks[0].remote_deleted_at is not None
     assert tasks[1].remote_deleted_at is not None
 
@@ -1055,10 +1071,21 @@ async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
     class FakeCleanupClient:
         def __init__(self, folders: list[dict]) -> None:
             self.folders = folders
+            self.children: dict[str, list[dict]] = {}
             self.deleted: list[str] = []
 
         async def list_files(self, parent_id, page_token=None):
-            return {"files": list(self.folders), "next_page_token": ""}
+            if not parent_id:
+                return {"files": list(self.folders), "next_page_token": ""}
+            return {
+                "files": list(self.children.get(parent_id, [])),
+                "next_page_token": "",
+            }
+
+        async def delete_files(self, file_ids: list[str]) -> int:
+            for file_id in file_ids:
+                self.deleted.append(file_id)
+            return 200
 
         async def delete_file(self, file_id: str) -> int:
             self.deleted.append(file_id)

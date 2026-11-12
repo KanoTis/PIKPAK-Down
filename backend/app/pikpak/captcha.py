@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
 
@@ -37,19 +38,40 @@ async def mint_drive_captcha(
             "timestamp": timestamp,
         },
     }
-    response = await http.post(
-        f"{user_base_url.rstrip('/')}/v1/shield/captcha/init",
-        json=body,
-        headers={
-            "X-Client-ID": WEB_CLIENT_ID,
-            "X-Device-ID": device_id,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Content-Type": "application/json",
-        },
-    )
-    if response.status_code >= 400:
-        raise RuntimeError(f"captcha init failed: {response.status_code} {response.text[:200]}")
-    data = response.json()
+    headers = {
+        "X-Client-ID": WEB_CLIENT_ID,
+        "X-Device-ID": device_id,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Content-Type": "application/json",
+    }
+    last_error = ""
+    for attempt in range(3):
+        try:
+            response = await http.post(
+                f"{user_base_url.rstrip('/')}/v1/shield/captcha/init",
+                json=body,
+                headers=headers,
+            )
+        except httpx.HTTPError as exc:
+            last_error = f"{type(exc).__name__}: {exc}".strip()
+            if attempt == 2:
+                raise RuntimeError(f"captcha init failed: {last_error}") from exc
+            await asyncio.sleep(1.0 + attempt)
+            continue
+        if response.status_code == 429 or response.status_code >= 500:
+            last_error = f"{response.status_code} {response.text[:200]}"
+            if attempt == 2:
+                raise RuntimeError(f"captcha init failed: {last_error}")
+            await asyncio.sleep(1.0 + attempt)
+            continue
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"captcha init failed: {response.status_code} {response.text[:200]}"
+            )
+        data = response.json()
+        break
+    else:
+        raise RuntimeError(f"captcha init failed: {last_error}")
     token = data.get("captcha_token") or data.get("token")
     if not token:
         raise RuntimeError("captcha init returned no token")
