@@ -814,6 +814,7 @@ async def test_tar_fallback_packs_and_starts_single_connection(env, fake_server,
             size=2048,
             expected_hash="HASH",
             status=TaskStatus.RESTORING,
+            restore_started_at=download.utcnow(),
         )
         session.add(task)
         await session.commit()
@@ -825,6 +826,7 @@ async def test_tar_fallback_packs_and_starts_single_connection(env, fake_server,
         assert task.drive_file_id == "TARFILE000000001"
         assert task.route == "tar"
         assert task.tar_size == 4096
+        assert task.restore_started_at is None
         assert task.source_url_enc
         assert started == [
             {

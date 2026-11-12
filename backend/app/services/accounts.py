@@ -255,7 +255,8 @@ async def claim_account(
             update(Account)
             .where(
                 Account.id == preferred_account_id,
-                Account.state.in_([AccountState.ACTIVE, AccountState.DISABLED]),
+                Account.state == AccountState.ACTIVE,
+                (Account.cooldown_until.is_(None)) | (Account.cooldown_until < now),
                 (Account.lease_task_id.is_(None))
                 | (Account.lease_task_id == task_id)
                 | (Account.lease_expires_at < now),

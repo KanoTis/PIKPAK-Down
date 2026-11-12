@@ -1459,6 +1459,7 @@ async def _handoff_via_tar(
     task.source_share_id = job.share_id
     task.source_file_id = task.share_file_id
     task.route = "tar"
+    task.restore_started_at = None
     task.error_code = None
     task.error_message = None
     await session.commit()
@@ -1689,6 +1690,7 @@ async def _handoff_with_account(
     task.source_share_id = job.share_id
     task.source_file_id = task.share_file_id
     task.route = "account"
+    task.restore_started_at = None
     task.error_code = None
     task.error_message = None
     _set_status(task, TaskStatus.WCL_READY)
