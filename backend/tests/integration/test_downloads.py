@@ -1002,12 +1002,15 @@ async def test_reconcile_account_files_deletes_tracked_terminal_files(env) -> No
                 "next_page_token": "",
             }
 
-        async def trash_files(self, file_ids: list[str]) -> int:
-            return 200
+        async def trash_files(self, file_ids: list[str]) -> str:
+            return "TRASHTASK000000002"
 
-        async def delete_files(self, file_ids: list[str]) -> int:
+        async def get_restore_task(self, task_id: str):
+            return {"phase": "PHASE_TYPE_COMPLETE"}
+
+        async def delete_files(self, file_ids: list[str]) -> str:
             self.deleted.append(list(file_ids))
-            return 200
+            return "DELETETASK00000002"
 
         async def delete_file(self, file_id: str) -> int:
             self.deleted.append([file_id])
@@ -1084,13 +1087,16 @@ async def test_stale_tar_folders_cleanup_skips_active_tasks(env) -> None:
                 "next_page_token": "",
             }
 
-        async def trash_files(self, file_ids: list[str]) -> int:
-            return 200
+        async def trash_files(self, file_ids: list[str]) -> str:
+            return "TRASHTASK000000001"
 
-        async def delete_files(self, file_ids: list[str]) -> int:
+        async def get_restore_task(self, task_id: str):
+            return {"phase": "PHASE_TYPE_COMPLETE"}
+
+        async def delete_files(self, file_ids: list[str]) -> str:
             for file_id in file_ids:
                 self.deleted.append(file_id)
-            return 200
+            return "DELETETASK00000001"
 
         async def delete_file(self, file_id: str) -> int:
             self.deleted.append(file_id)

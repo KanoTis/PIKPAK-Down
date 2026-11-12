@@ -1832,18 +1832,51 @@ def _reset_tar_task(task: DownloadTask) -> None:
     task.queue_reason = "NO_QUOTA"
 
 
+async def _wait_remote_task(client, task_id: str, *, timeout: float = 60.0) -> bool:
+    if not task_id:
+        return True
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            state = await client.get_restore_task(task_id)
+        except NotFound:
+            return True
+        except PikPakError:
+            raise
+        phase = str(state.get("phase") or "").upper()
+        message = str(state.get("message") or "").lower()
+        if phase in ("PHASE_TYPE_COMPLETE", "COMPLETE") or message == "completed":
+            return True
+        if phase in ("PHASE_TYPE_ERROR", "ERROR") or message in ("error", "failed"):
+            return False
+        await asyncio.sleep(1.5)
+    return False
+
+
 async def _delete_remote_file(client, file_id: str) -> int:
     if not file_id:
         return 0
     try:
-        await client.trash_files([file_id])
+        task_id = await client.trash_files([file_id])
     except NotFound:
         # It may already be in the trash; still try the permanent delete.
-        pass
+        task_id = ""
+    if not await _wait_remote_task(client, task_id):
+        raise PikPakError(
+            "trash task did not finish",
+            code="CLEANUP_TASK_TIMEOUT",
+            retryable=True,
+        )
     try:
-        await client.delete_files([file_id])
+        task_id = await client.delete_files([file_id])
     except NotFound:
         return 0
+    if not await _wait_remote_task(client, task_id):
+        raise PikPakError(
+            "delete task did not finish",
+            code="CLEANUP_TASK_TIMEOUT",
+            retryable=True,
+        )
     return 1
 
 
@@ -1857,14 +1890,26 @@ async def _delete_folder_tree(client, folder_id: str) -> int:
     if not folder_id:
         return 0
     try:
-        await client.trash_files([folder_id])
+        task_id = await client.trash_files([folder_id])
     except NotFound:
         # Already trashed; still try the permanent delete.
-        pass
+        task_id = ""
+    if not await _wait_remote_task(client, task_id):
+        raise PikPakError(
+            "trash task did not finish",
+            code="CLEANUP_TASK_TIMEOUT",
+            retryable=True,
+        )
     try:
-        await client.delete_files([folder_id])
+        task_id = await client.delete_files([folder_id])
     except NotFound:
         return 0
+    if not await _wait_remote_task(client, task_id):
+        raise PikPakError(
+            "delete task did not finish",
+            code="CLEANUP_TASK_TIMEOUT",
+            retryable=True,
+        )
     return 1
 
 
