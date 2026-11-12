@@ -139,6 +139,33 @@ async def account_drive(
     }
 
 
+@router.post("/accounts/{account_id}/trash/empty")
+async def empty_account_trash_route(
+    account_id: str,
+    force: bool = False,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    from ..services.download import empty_account_trash
+
+    account = await session.get(Account, account_id)
+    if account is None:
+        raise _error(404, "ACCOUNT_NOT_FOUND", "账号不存在")
+    try:
+        result = await empty_account_trash(session, account, force=force)
+    except Unauthorized as exc:
+        raise _error(400, "ACCOUNT_TOKEN_INVALID", str(exc)) from exc
+    except PikPakError as exc:
+        raise _error(502, "ACCOUNT_TRASH_FAILED", str(exc)) from exc
+    if result.get("refused"):
+        raise _error(
+            409,
+            "TRASH_NOT_EMPTY",
+            "回收站仍有文件；确认要永久清空请带 force=true",
+            details={"trash_bytes": result.get("trash_bytes")},
+        )
+    return {"account_id": account.id, **result}
+
+
 @router.post("/accounts/{account_id}/refresh", response_model=AccountOut)
 async def refresh_account(
     account_id: str, session: AsyncSession = Depends(get_session)

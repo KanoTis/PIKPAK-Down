@@ -662,6 +662,13 @@ class AccountPikPakClient(_BaseClient):
         )
         return response.json()
 
+    async def empty_trash(self) -> str:
+        response = await self._drive(
+            "PATCH",
+            "/drive/v1/files/trash:empty",
+        )
+        return str((response.json() or {}).get("task_id") or "")
+
     async def batch_untrash(self, ids: list[str]) -> dict[str, Any]:
         response = await self._drive(
             "POST",

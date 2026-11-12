@@ -929,6 +929,60 @@
         }
       }
     },
+    "/api/accounts/{account_id}/trash/empty": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Empty Account Trash Route",
+        "operationId": "empty_account_trash_route_api_accounts__account_id__trash_empty_post",
+        "parameters": [
+          {
+            "name": "account_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Account Id"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Force"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Empty Account Trash Route Api Accounts  Account Id  Trash Empty Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/accounts/{account_id}/refresh": {
       "post": {
         "tags": [

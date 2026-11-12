@@ -7,6 +7,7 @@ import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import structlog
 from sqlalchemy import delete, func, select, update
@@ -1995,6 +1996,45 @@ async def _cleanup_stale_tar_folders(
         await session.commit()
         log.info("stale_tar_folders_removed", count=removed)
     return removed
+
+
+async def empty_account_trash(
+    session: AsyncSession, account: Account, *, force: bool = False
+) -> dict[str, Any]:
+    client = make_client(account)
+    try:
+        about = await client.about()
+        before = dict(about.get("quota") or {})
+        try:
+            trash_bytes = int(before.get("usage_in_trash") or 0)
+        except (TypeError, ValueError):
+            trash_bytes = 0
+        if trash_bytes > 0 and not force:
+            return {
+                "refused": True,
+                "trash_bytes": trash_bytes,
+                "quota_before": before,
+                "quota_after": before,
+            }
+        task_id = await client.empty_trash()
+        if not await _wait_remote_task(client, task_id):
+            raise PikPakError(
+                "empty trash task did not finish",
+                code="CLEANUP_TASK_TIMEOUT",
+                retryable=True,
+            )
+        about = await client.about()
+        await update_quota_from_about(account, about)
+        await session.commit()
+        after = dict(about.get("quota") or {})
+        return {
+            "refused": False,
+            "trash_bytes": trash_bytes,
+            "quota_before": before,
+            "quota_after": after,
+        }
+    finally:
+        await client.close()
 
 
 async def reconcile_account_files(

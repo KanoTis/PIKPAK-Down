@@ -930,6 +930,15 @@ def create_app() -> FastAPI:
         STATE["events"].append({"type": "fetch", "file_id": file_id, "t": time.time()})
         return data
 
+    @app.patch("/drive/v1/files/trash:empty")
+    async def empty_trash(request: Request):
+        denied = _require_drive(request)
+        if denied:
+            return denied
+        STATE["trash_calls"] += 1
+        STATE["events"].append({"type": "empty_trash", "t": time.time()})
+        return {"task_id": "EMPTYTRASH0000001"}
+
     @app.post("/drive/v1/files:batchTrash")
     async def batch_trash(request: Request):
         denied = _require_drive(request)

@@ -71,6 +71,32 @@ async def test_pause_resume_cancel_retry_state_machine(env, fake_server) -> None
 
 
 @pytest.mark.asyncio
+async def test_empty_trash_endpoint(env, fake_server) -> None:
+    from app.db import get_session_factory
+    from app.main import app
+    from app.services.accounts import import_account
+
+    factory = get_session_factory()
+    async with factory() as session:
+        account = await import_account(
+            session,
+            label="trash-empty",
+            email=None,
+            refresh_token="fake-refresh-token",
+        )
+        await session.commit()
+        account_id = account.id
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(f"/api/accounts/{account_id}/trash/empty")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["refused"] is False
+    assert "quota_before" in body and "quota_after" in body
+
+
+@pytest.mark.asyncio
 async def test_account_drive_lists_root_items(env, fake_server) -> None:
     from app.db import get_session_factory
     from app.main import app
