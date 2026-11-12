@@ -99,6 +99,46 @@ async def create_account(
     return account_out(account)
 
 
+@router.get("/accounts/{account_id}/drive")
+async def account_drive(
+    account_id: str,
+    parent_id: str = "",
+    page_token: str | None = None,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    account = await session.get(Account, account_id)
+    if account is None:
+        raise _error(404, "ACCOUNT_NOT_FOUND", "账号不存在")
+    client = make_client(account)
+    try:
+        data = await client.list_files(parent_id, page_token)
+        about = await client.about()
+        await update_quota_from_about(account, about)
+        await session.commit()
+    except Unauthorized as exc:
+        raise _error(400, "ACCOUNT_TOKEN_INVALID", str(exc)) from exc
+    except PikPakError as exc:
+        raise _error(502, "ACCOUNT_DRIVE_FAILED", str(exc)) from exc
+    finally:
+        await client.close()
+    return {
+        "parent_id": parent_id,
+        "quota": dict(about.get("quota") or {}),
+        "next_page_token": data.get("next_page_token") or "",
+        "files": [
+            {
+                "id": item.get("id"),
+                "name": item.get("name"),
+                "kind": item.get("kind"),
+                "size": item.get("size"),
+                "parent_id": item.get("parent_id"),
+                "trashed": item.get("trashed"),
+            }
+            for item in (data.get("files") or [])
+        ],
+    }
+
+
 @router.post("/accounts/{account_id}/refresh", response_model=AccountOut)
 async def refresh_account(
     account_id: str, session: AsyncSession = Depends(get_session)

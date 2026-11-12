@@ -71,6 +71,33 @@ async def test_pause_resume_cancel_retry_state_machine(env, fake_server) -> None
 
 
 @pytest.mark.asyncio
+async def test_account_drive_lists_root_items(env, fake_server) -> None:
+    from app.db import get_session_factory
+    from app.main import app
+    from app.services.accounts import import_account
+
+    factory = get_session_factory()
+    async with factory() as session:
+        account = await import_account(
+            session,
+            label="drive-list",
+            email=None,
+            refresh_token="fake-refresh-token",
+        )
+        await session.commit()
+        account_id = account.id
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get(f"/api/accounts/{account_id}/drive")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["parent_id"] == ""
+    assert body["quota"]["limit"]
+    assert isinstance(body["files"], list)
+
+
+@pytest.mark.asyncio
 async def test_reconcile_endpoint_removes_terminal_restore_folder(env, fake_server) -> None:
     from app.db import get_session_factory
     from app.main import app
